@@ -16,6 +16,6 @@ setup(
 		"cyvcf2",
 		"scikit-allel",
 		"pyfaidx"
-	]
+	],
 	zip_safe = False
 )
