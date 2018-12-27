@@ -33,6 +33,7 @@ usage:
 
 	  --- Ancestral alleles
 	      polarize          define ancestral alleles based on outgroup sequence
+	      titv              annotate sites as transitions or transversions; flag gBGC candidates
 	      derived           count derived alleles per sample, using either read counts or hard calls
 
 	  --- Allele frequencies
@@ -102,7 +103,7 @@ These were introduced (I think) in [Manske _et al_ (2012) _Nature Genetics_ **48
 To avoid spawning not-a-number warnings, `vcfdo` encodes missing values for these quantities as -1.
 
 ## Order of operations
-The design of `vcfdo` is modular: multiple tools may need to be strung together to accomplish a given task. In most cases this comes down to creating and then using site- or genotype-level annotations in the VCF. The table below summarises the annotations required and/or produced by each tool in `vcfdo`.
+The design of `vcfdo` is modular: multiple tools may need to be strung together to accomplish a given task. In most cases this comes down to creating and then using site- or genotype-level annotations in the VCF. The table below summarises the annotations required and/or produced by each tool in `vcfdo`. Annotations in the **recalculates** column are re-computed on the fly _before_ doing any work.
 
 | tool | requires | adds | recalculates
 --- | --- | --- | ---
@@ -112,6 +113,7 @@ The design of `vcfdo` is modular: multiple tools may need to be strung together 
 | `pca` | `FORMAT/WSAF` | none | `INFO/PLMAF`
 | `dist` | `FORMAT/WSAF` | none | none
 | `polarize` | none | `INFO/AA` | none
+| `titv` | `INFO/AA` | `INFO/Transversion`, `INFO/StrongWeak`, `INFO/BGC` | none
 | `derived` | `INFO/AA` | none | none
 | `private` | `FORMAT/WSAF` (with `--reads`) | `INFO/{flag}`, where `{flag}` is specified by user | none
 | `sfs` | `INFO/AA` (unless `--ref-is-ancestral`), `FORMAT/WSAF` (with `--reads`) | none | none

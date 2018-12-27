@@ -1,6 +1,6 @@
 #! /usr/bin/env python3
 """
-vcfutils.py
+vcfdo
 Some utilities for annotating, summarising and filtering VCF files with an eye towards Plasmodium spp.
 """
 
@@ -563,6 +563,121 @@ def polarize_anc_vs_der(vcf, log, ns, **kwargs):
 	log.info("\t------------")
 	log.info("\t{: >12d} total sites".format(ii))
 
+def transition_or_transversion(vcf, log, ns, **kwargs):
+
+	## modify outgoing VCF header
+	vcf.add_info_to_header({ "ID": "Transversion", "Description": "Is this site a transition (0), transversion (1), or undefined (-1)?", "Number": 1, "Type": "Integer" })
+	vcf.add_info_to_header({ "ID": "StrongWeak", "Description": "H-bond strength of ancestral and derived states (w=weak, s=strong)", "Number": 1, "Type": "String" })
+	vcf.add_info_to_header({ "ID": "BGC", "Description": "Is this site a candidate for GC-biased gene coversion? 0=No, 1=Yes, -1=undefined", "Number": 1, "Type": "Integer" })
+	sys.stdout.write(vcf.raw_header)
+
+	def ti_or_tv(anc, der):
+		anc = anc.upper()
+		der = der.upper()
+		subst = anc + ">" + der
+		if subst in ["A>G","C>T","G>A","T>C"]:
+			return 0
+		else:
+			return 1
+
+	def is_bgc(anc, der):
+		anc = anc.upper()
+		der = der.upper()
+		subst = anc + ">" + der
+		if anc in ["A","T"] and der in ["G","C"]:
+			return 1
+		else:
+			return 0
+
+	def strong_or_weak(anc, der):
+		anc = anc.upper()
+		der = der.upper()
+		subst = anc + ">" + der
+		strength = { "A": "w", "C": "s", "G": "s", "T": "w" }
+		return strength[anc] + strength[der]
+
+	def good_alleles(alleles):
+		alleles = "".join(alleles).upper()
+		return all(_ in "ACGT" for _ in alleles)
+
+	## loop on VCF
+	nti, ntv, nbgc = 0, 0, 0
+	nnotsnv = 0
+	nnoanc = 0
+	#nbadprefix = 0
+	nbadallele = 0
+	nmulti = 0
+	ii = 0
+	log.info("Processing VCF file ...")
+	for site in vcf:
+
+		ii += 1
+
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
+
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
+
+		if not (site.is_snp and not site.is_indel):
+			nnotsnv += 1
+			continue
+
+		if len(site.ALT) > 1:
+			nmulti += 1
+			continue
+
+		if not good_alleles([site.REF] + site.ALT):
+			nbadallele += 1
+			continue
+
+		## absent or bogus ancestral allele?
+		anc = "X"
+		try:
+			anc = site.INFO["AA"]
+			#log.info("Ancestral allele is '{}'".format(anc))
+		except KeyError as e:
+			nnoanc += 1
+			continue
+
+		if anc == "X":
+			nnoanc += 1
+			continue
+
+		if anc == site.REF:
+			der = site.ALT[0]
+		elif anc == site.ALT[0]:
+			der = site.REF
+		else:
+			nnoanc += 1
+			continue
+
+		titv = ti_or_tv(anc, der)
+		if titv == 0:
+			nti += 1
+		elif titv == 1:
+			ntv += 1
+		sw = strong_or_weak(anc, der)
+		bgc = is_bgc(anc, der)
+		if bgc == 1:
+			nbgc += 1
+		site.INFO["Transversion"] = titv
+		site.INFO["StrongWeak"] = sw
+		site.INFO["BGC"] = bgc
+
+		sys.stdout.write(str(site))
+
+	log.info("Done.".format(ii))
+	log.info("\t{: >12d} not SNVs".format(nnotsnv))
+	log.info("\t{: >12d} with >2 alleles".format(nmulti))
+	log.info("\t{: >12d} with bad allele(s)".format(nbadallele))
+	log.info("\t{: >12d} transitions".format(nti))
+	log.info("\t{: >12d} transversions".format(ntv))
+	log.info("\t{: >12d} gBGC candidates".format(nbgc))
+	log.info("\t------------")
+	log.info("\t{: >12d} total sites".format(ii))
+	log.info("\t[ TiTv = {:0.3f} ]".format(nti/ntv))
 
 def count_derived(vcf, log, ns, **kwargs):
 
@@ -962,6 +1077,7 @@ def root_help_message(name = None):
 
 	  --- Ancestral alleles
 	      polarize          define ancestral alleles based on outgroup sequence
+	      titv              annotate sites as transitions or transversions; flag gBGC candidates
 	      derived           count derived alleles per sample, using either read counts or hard calls
 
 	  --- Allele frequencies
@@ -1081,6 +1197,12 @@ anc_parser.add_argument("-f","--fasta",
 					help = "ancestral genome fasta file, **in same coordinates as reference**")
 anc_parser.set_defaults(func = polarize_anc_vs_der, command = "polarize")
 
+## annotate sites as transition or transversion, gBGC or not, and biochemical "strength"
+anc_parser = subparsers.add_parser("titv",
+	description = "Annotate variants as transition or transversion; flag gBGC candidates",
+	parents = [parser])
+anc_parser.set_defaults(func = transition_or_transversion, command = "titv")
+
 ## count number of derived calls per sample
 anc_parser = subparsers.add_parser("derived",
 	description = "Count proportion of calls for derived vs ancestral allele, using WSAF (default) or hard calls",
@@ -1163,7 +1285,7 @@ logger.info("Connecting to VCF file <{}>".format(args.infile))
 cmd_line = " ".join(sys.argv[1:])
 pwd = os.path.expandvars(os.getcwd())
 timestamp = dt.now().strftime("%Y-%m-%d %H:%M:%S")
-vcf.add_to_header("##vcfutils_command={}; pwd={}; timestamp={}".format(cmd_line, pwd, timestamp))
+vcf.add_to_header("##vcfdo_command={}; pwd={}; timestamp={}".format(cmd_line, pwd, timestamp))
 
 ## do the requested thing
 logger.info("Task: {}".format(args.command))
