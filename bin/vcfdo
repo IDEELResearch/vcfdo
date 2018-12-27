@@ -911,7 +911,7 @@ def calc_sfs(vcf, log, ns, **kwargs):
 	if not args.pops:
 		log.info("Treating all samples in VCF as coming from one population.")
 		pops = defaultdict(list)
-		pops["pop1"].extend( list(vcf.samples) )
+		pops["pop1"].extend( list(range(0, len(vcf.samples))) )
 	else:
 		log.info("Reading population assignments from <{}>".format(args.pops.name))
 		## decide which samples to use
@@ -981,8 +981,13 @@ def calc_sfs(vcf, log, ns, **kwargs):
 
 		## no ancestral allele?
 		anc = "X"
-		if "AA" in site.INFO:
+		try:
 			anc = site.INFO["AA"]
+			#log.info("Ancestral allele is '{}'".format(anc))
+		except KeyError as e:
+			nnoanc += 1
+			continue
+
 		if anc == "X":
 			if args.ref_is_ancestral:
 				anc = site.REF
@@ -997,16 +1002,16 @@ def calc_sfs(vcf, log, ns, **kwargs):
 			else:
 				nused += 1
 			counts = site.format("WSAF")[:,0]
-			if not anc == site.REF:
-				counts = 1 - counts
 			sampled = np.zeros(len(ssz), dtype = np.int)
 			for ii,pop in enumerate(pop_order):
 				these_counts = counts[ pops[pop] ]
-				print(these_counts)
 				if np.all(these_counts == -1):
 					continue
-				maf = np.average(these_counts[ these_counts > -1 ])
+				good_counts = these_counts[ these_counts > -1 ]
+				maf = np.average(good_counts)
 				these_counts[ these_counts == -1 ] = maf
+				if not anc == site.REF:
+					these_counts = 1 - these_counts
 				sampled[ii] = np.sum(np.random.binomial(1, these_counts))
 			sampled = tuple(sampled)
 		else:
@@ -1019,8 +1024,11 @@ def calc_sfs(vcf, log, ns, **kwargs):
 				if np.all(omit):
 					continue
 				these_counts = these_counts/ploidy
-				maf = np.average(these_counts[ ~omit ])
+				good_counts = these_counts[ ~omit ]
+				maf = np.average(good_counts)
 				these_counts[ omit ] = maf
+				if not anc == site.REF:
+					these_counts = 1 - these_counts
 				sampled[ii] = np.sum(np.random.binomial(1, these_counts))
 			sampled = tuple(sampled)
 
