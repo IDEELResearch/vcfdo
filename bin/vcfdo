@@ -11,9 +11,11 @@ import itertools as it
 import argparse
 import logging
 
+np.warnings.filterwarnings("ignore")
+
 from re import split as resplit
 from datetime import datetime as dt
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from cyvcf2 import VCF
 from allel import pca, randomized_pca
 from pyfaidx import Fasta
@@ -43,6 +45,12 @@ def calc_wsaf(vcf, log, ns, **kwargs):
 	for site in vcf:
 
 		ii += 1
+
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
 
 		## don't bother with multiallelic sites
 		if len(site.ALT) > 1:
@@ -102,12 +110,6 @@ def calc_wsaf(vcf, log, ns, **kwargs):
 			log.warning("Stopped because the pipe reading from this program has closed.".format(ii))
 			break
 
-		if not ii % 1000:
-			log.info("\t... processed {} sites ...".format(ii))
-
-		if ii >= ns and ns > -1:
-			break
-
 	log.info("Done.".format(ii))
 	log.info("\t{: >12d} biallelic in called genotypes".format(ii-nmulti))
 	log.info("\t{: >12d} non-polymorphic in called genotypes".format(nnonpoly))
@@ -133,6 +135,13 @@ def calc_fws(vcf, log, ns, **kwargs):
 
 		ii += 1
 
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
+
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
+
 		## don't bother with multiallelic sites
 		if len(site.ALT) > 1:
 			nmulti += 1
@@ -143,22 +152,17 @@ def calc_fws(vcf, log, ns, **kwargs):
 			nnonpoly += 1
 			continue
 
-		if not ii % 1000:
-			log.info("\t... processed {} sites ...".format(ii))
-
 		#if (not "WSAF" in site.FORMAT) or (not "PLMAF" in site.INFO):
 		#	nnowsaf += 1
 		#	continue
 
 		wsaf = np.ma.masked_values(site.format("WSAF"), -1)
-		plmaf = site.INFO["PLMAF"]
+		plmaf = min(np.average(wsaf), 1 - np.average(wsaf))
+		#plmaf = site.INFO["PLMAF"]
 		H_px = 1 - (plmaf**2 + (1 - plmaf)**2)
 		H_sx = 1 - (np.power(wsaf, 2) + np.power((1 - wsaf), 2))
 		H_p.append(H_px)
 		H_s.append(H_sx)
-
-		if ii >= ns and ns > -1:
-			break
 
 	log.info("Done reading VCF.".format(ii))
 	log.info("\t{: >12d} biallelic in called genotypes".format(ii-nmulti))
@@ -182,7 +186,7 @@ def calc_fws(vcf, log, ns, **kwargs):
 		X = X.reshape(len(X), 1)
 		y = H_p[ ~H_sx.mask ]
 		#print(X.shape, y.shape)
-		beta, sse, rank, sv = np.linalg.lstsq(y, X)
+		beta, sse, rank, sv = np.linalg.lstsq(y, X, rcond = None) # `rcond` passed to avoid FutureWarning
 		sigma2 = np.sum((y - np.dot(X, beta))**2) / (X.shape[0] - 1)
 		C = sigma2 * np.linalg.pinv(np.dot(X.T, X)) # covariance matrix
 		se = np.sqrt(np.diag(C)) # standard error
@@ -204,7 +208,11 @@ def pca_wsaf(vcf, log, ns, **kwargs):
 			if line.startswith("#"):
 				continue
 			else:
-				keep_samples.append( line.strip().split().pop(0) )
+				iid = line.strip().split().pop(0)
+				if not iid in vcf.samples:
+					log.warning("Sample '{}' in populations file but not in VCF; skpping it.".format(iid))
+					continue
+				keep_samples.append(iid)
 		log.info("Read {} samples from file <{}>".format(len(keep_samples), args.samples_file.name))
 	elif args.samples is not None and len(args.samples):
 		keep_samples = args.samples
@@ -232,6 +240,12 @@ def pca_wsaf(vcf, log, ns, **kwargs):
 	for site in vcf:
 
 		ii += 1
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
+
 		if site.INFO["PLMAF"] < args.min_plmaf:
 			continue
 
@@ -249,12 +263,6 @@ def pca_wsaf(vcf, log, ns, **kwargs):
 		ww = w[:]
 		ww[ ww == -1 ] = plaf
 		W[nkept,:] = ww
-
-		if not ii % 1000:
-			log.info("\t... processed {} sites [kept {}]...".format(ii, nkept))
-
-		if ii >= ns and ns > -1:
-			break
 
 	## remove low-variance sites that make bad things happen in SVD
 	W = W[:nkept,:]
@@ -298,6 +306,13 @@ def calc_weighted_dist(vcf, log, ns, **kwargs):
 	for site in vcf:
 
 		ii += 1
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
+
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
+
 		if ii >= wsaf.shape[0]:
 			log.debug("Increasing array allocation ... ")
 			wsaf = np.append( wsaf, give_chunk(), axis = 0 )
@@ -312,12 +327,6 @@ def calc_weighted_dist(vcf, log, ns, **kwargs):
 		ww = this_wsaf[:,0]
 		ww[ ww == -1 ] = plaf
 		wsaf_imputed[ii,:] = ww
-
-		if not ii % 1000:
-			log.info("\t... processed {} sites ...".format(ii))
-
-		if ii >= ns and ns > -1:
-			break
 
 	wsaf = wsaf[ :ii, : ]
 	wsaf_imputed = wsaf_imputed[ :ii, : ]
@@ -361,6 +370,12 @@ def summarise_dp(vcf, log, ns, **kwargs):
 	for site in vcf:
 
 		ii += 1
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
+
 		if ii >= sample_dp.shape[0]:
 			log.debug("Increasing array allocation ... ")
 			sample_dp = np.append( sample_dp, np.zeros((CHUNK_SIZE,len(vcf.samples)), dtype = np.int), axis = 0 )
@@ -368,12 +383,6 @@ def summarise_dp(vcf, log, ns, **kwargs):
 		this_dp = site.format("DP").T[0:]
 		this_dp[ this_dp < 0 ] = 0
 		sample_dp[ii,:] = this_dp
-
-		if not ii % 1000:
-			log.info("\t... processed {} sites ...".format(ii))
-
-		if ii >= ns and ns > -1:
-			break
 
 	mu = np.mean(sample_dp[:ii,:], 0)
 	sigma = np.std(sample_dp[:ii,:], 0)
@@ -410,6 +419,13 @@ def summarise_flt(vcf, log, ns, **kwargs):
 
 		ii += 1
 
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
+
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
+
 		site_filt = "PASS" if site.FILTER is None else site.FILTER
 		if what_mode == "SITES":
 			counter[site_filt] += 1
@@ -421,12 +437,6 @@ def summarise_flt(vcf, log, ns, **kwargs):
 			else:
 				for iid in vcf.samples:
 					counter[jj][iid]["PASS"] += 1
-
-		if not ii % 1000:
-			log.info("\t... processed {} sites ...".format(ii))
-
-		if ii >= ns and ns > -1:
-			break
 
 	#print(counter)
 	if what_mode == "SITES":
@@ -466,17 +476,19 @@ def calc_missingness(vcf, log, ns, **kwargs):
 
 		ii += 1
 
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
+
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
+
 		if what_mode == "SITES":
 			nmiss = np.sum(site.gt_types == 3)
 			ntot = len(vcf.samples)
 			print(site.CHROM, site.POS, site.ID, site.REF, ",".join(site.ALT), nmiss, nmiss/ntot, sep = "\t")
 		elif what_mode == "SAMPLES":
 			counts += (site.gt_types == 3)
-		if not ii % 1000:
-			log.info("\t... processed {} sites ...".format(ii))
-
-		if ii >= ns and ns > -1:
-			break
 
 	#print(counter)
 	if what_mode == "SITES":
@@ -520,6 +532,13 @@ def polarize_anc_vs_der(vcf, log, ns, **kwargs):
 
 		ii += 1
 
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
+
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
+
 		start = site.POS - 1
 		end = start + len(site.REF)
 		alleles = [site.REF] + site.ALT
@@ -536,12 +555,6 @@ def polarize_anc_vs_der(vcf, log, ns, **kwargs):
 
 		site.INFO["AA"] = anc
 		sys.stdout.write(str(site))
-
-		if not ii % 1000:
-			log.info("\t... processed {} sites ...".format(ii))
-
-		if ii >= ns and ns > -1:
-			break
 
 	log.info("Done.".format(ii))
 	log.info("\t{: >12d} had undefined ancestral allele".format(nmissing))
@@ -579,11 +592,12 @@ def count_derived(vcf, log, ns, **kwargs):
 
 		ii += 1
 
-		if ii > ns and ns > -1:
-			break
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
 
-		if not ii % 1000:
-			log.info("\t... processed {} sites ...".format(ii))
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
 
 		## absent or bogus ancestral allele?
 		anc = "X"
@@ -665,7 +679,11 @@ def flag_private(vcf, log, ns, **kwargs):
 			if line.startswith("#"):
 				continue
 			else:
-				keep_samples.append( line.strip().split().pop(0) )
+				iid = line.strip().split().pop(0)
+				if not iid in vcf.samples:
+					log.warning("Sample '{}' in populations file but not in VCF; skpping it.".format(iid))
+					continue
+				keep_samples.append(iid)
 		log.info("Read {} samples from file <{}>".format(len(keep_samples), args.samples_file.name))
 	elif len(args.samples):
 		keep_samples = []
@@ -708,11 +726,12 @@ def flag_private(vcf, log, ns, **kwargs):
 
 		ii += 1
 
-		if ii > ns and ns > -1:
-			break
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
 
-		if not ii % 1000:
-			log.info("\t... processed {} sites ...".format(ii))
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
 
 		## not biallelic?
 		if len(site.ALT) > 1:
@@ -723,8 +742,11 @@ def flag_private(vcf, log, ns, **kwargs):
 			if not "AD" in site.FORMAT:
 				nnodp += 1
 				continue
+			else:
+				nused += 1
 			counts = site.format("AD")[:,1]
 		else:
+			nused += 1
 			counts = site.gt_types[:]
 
 		if is_private(counts):
@@ -742,6 +764,186 @@ def flag_private(vcf, log, ns, **kwargs):
 	log.info("\t------------")
 	log.info("\t{: >12d} total sites".format(ii))
 
+def calc_sfs(vcf, log, ns, **kwargs):
+
+	## load args into a namespace, so I don't have to recode so much stuff
+	args = argparse.Namespace(**kwargs)
+
+	## set RNG seed
+	log.info("RNG seed := {}".format(args.seed))
+	np.random.seed(args.seed)
+
+	## calculate SFS by hard calls or read counts?
+	if not (args.reads or args.calls) or (args.reads and args.calls):
+		log.error("Must specify either `--calls` OR `--reads`, and not both.")
+		sys.exit(1)
+
+	how_count = "READ COUNTS" if args.reads else "GENOTYPE CALLS"
+	log.info("Calculating uSFS from {}".format(how_count))
+
+	if not args.pops:
+		log.info("Treating all samples in VCF as coming from one population.")
+		pops = defaultdict(list)
+		pops["pop1"].extend( list(vcf.samples) )
+	else:
+		log.info("Reading population assignments from <{}>".format(args.pops.name))
+		## decide which samples to use
+		pops = defaultdict(list)
+		seen = defaultdict(int)
+		for line in args.pops:
+			if line.startswith("#"):
+				continue
+			pieces = line.strip().split()
+			# not an iid,pop tuple? skip
+			if len(pieces) < 2:
+				continue
+			iid, pop = pieces[:2]
+			# sample not in VCF? skip
+			if not iid in vcf.samples:
+				log.warning("Sample '{}' in populations file but not in VCF; skpping it.".format(iid))
+				continue
+			# already seen this sample? assume first assignment was right
+			if iid in seen:
+				continue
+			else:
+				seen[iid] += 1
+			# finally, add sample to population
+			pops[pop].append( vcf.samples.index(iid) )
+
+	pop_order = sorted(pops, key = lambda k: -1*len(pops[k]))
+	ssz = [ len(pops[_]) for _ in pop_order ]
+	dims = tuple([ _ + 1 for _ in ssz ])
+
+	log.info("Populations and their sizes:")
+	for ii,pop in enumerate(pops.keys()):
+		log.info("\t{}  {: >4d}".format(pop, ssz[ii]))
+
+	## initialize SFS
+	sfs = np.zeros(dims, dtype = np.int)
+	log.info("SFS will have these dimensions: {}".format(dims))
+
+	## loop on VCF
+	nused = 0
+	nnodp = 0
+	nmulti = 0
+	nnoanc = 0
+	ii = 0
+	ploidy = None
+	log.info("Processing VCF file ...")
+	for site in vcf:
+
+		## sniff ploidy
+		if ploidy is None:
+			pieces = resplit(r"[/|]", site.gt_bases[0])
+			ploidy = len(pieces)
+			log.info("Detected ploidy = {} in this VCF".format(ploidy))
+
+		ii += 1
+
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
+
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
+
+		## not biallelic?
+		if len(site.ALT) > 1:
+			nmulti += 1
+			continue
+
+		## no ancestral allele?
+		anc = "X"
+		if "AA" in site.INFO:
+			anc = site.INFO["AA"]
+		if anc == "X":
+			if args.ref_is_ancestral:
+				anc = site.REF
+			else:
+				nnoanc += 1
+				continue
+
+		if args.reads:
+			if not "WSAF" in site.FORMAT:
+				nnodp += 1
+				continue
+			else:
+				nused += 1
+			counts = site.format("WSAF")[:,0]
+			if not anc == site.REF:
+				counts = 1 - counts
+			sampled = np.zeros(len(ssz), dtype = np.int)
+			for ii,pop in enumerate(pop_order):
+				these_counts = counts[ pops[pop] ]
+				if np.all(these_counts == -1):
+					continue
+				maf = np.average(these_counts[ these_counts > -1 ])
+				these_counts[ these_counts == -1 ] = maf
+				sampled[ii] = np.sum(np.random.binomial(1, these_counts))
+			sampled = tuple(sampled)
+		else:
+			nused += 1
+			counts = site.gt_types[:]
+			sampled = np.zeros(len(ssz), dtype = np.int)
+			for ii,pop in enumerate(pop_order):
+				these_counts = counts[ pops[pop] ]
+				omit = (these_counts == 3)
+				if np.all(omit):
+					continue
+				these_counts = these_counts/ploidy
+				maf = np.average(these_counts[ ~omit ])
+				these_counts[ omit ] = maf
+				sampled[ii] = np.sum(np.random.binomial(1, these_counts))
+			sampled = tuple(sampled)
+
+		## finally, update the sfs
+		sfs[ sampled ] += 1
+
+	log.info("Done.")
+	log.info("\t{: >12d} had usable data".format(nused))
+	if args.reads:
+		log.info("\t{: >12d} had no WSAF annotation".format(nnodp))
+	log.info("\t{: >12d} had >2 alleles".format(nmulti))
+	log.info("\t------------")
+	log.info("\t{: >12d} total sites".format(ii))
+
+	print("#pops={}".format(",".join(pop_order)))
+	print("#dims={}".format(",".join([ str(_) for _ in dims ])))
+	print("#nsites={}".format(nused))
+	print(*sfs.flatten(), sep = " ")
+
+def thin_sites(vcf, log, ns, **kwargs):
+
+	## load args into a namespace, so I don't have to recode so much stuff
+	args = argparse.Namespace(**kwargs)
+
+	## write outgoing VCF header
+	sys.stdout.write(str(vcf.raw_header))
+
+	ii = 0
+	nkept = 0
+	log.info("Processing VCF file ...")
+	for site in vcf:
+
+		ii += 1
+
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
+
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
+
+		if not ii % args.every:
+			nkept += 1
+			sys.stdout.write(str(site))
+
+	log.info("Done.")
+	log.info("\t{: >12d} kept ({:0.3f}%)".format(nkept, 100*nkept/ii))
+	log.info("\t{: >12d} discarded".format(ii-nkept))
+	log.info("\t------------")
+	log.info("\t{: >12d} total sites".format(ii))
+
 
 ## root-level argument parser
 def root_help_message(name = None):
@@ -755,6 +957,9 @@ def root_help_message(name = None):
 	      depthsummary      quantiles of read depth (at called sites) per sample
 	      filtersummary     tallies of filter status by site or by sample
 
+	  --- Downsampling
+	      thin              emit every nth site, possibly with random starting point
+
 	  --- Ancestral alleles
 	      polarize          define ancestral alleles based on outgroup sequence
 	      derived           count derived alleles per sample, using either read counts or hard calls
@@ -763,16 +968,17 @@ def root_help_message(name = None):
 	      wsaf              calculate within-sample allele frequency (WSAF) and related quantities from read counts
 	      fws               estimate pseudo-inbreeding coefficient F_ws ("within-sample relatedness")
 	      private           annotate sites where non-ref allele is only found in certain subset of samples
+	      sfs               approximate the n-dimensional unfolded SFS by sampling
 
 	  --- Relatedness/ordination
 	      dist              calculate LD-weighted pairwise distances from within-sample allele frequencies
 	      pca               perform PCA using within-sample allele frequencies instead of hard calls
 
 	Notes:
-	-- All commands that take VCF as input or output work on pipes. For basic filtering operations,
+	* All commands that take VCF as input or output work on pipes. For basic filtering operations,
 	it is recommended to use `bcftools` and pipe to this tool.
-	-- Input can be in any format that `htslib` can handle -- VCF, bgzipped VCF, BCF, etc.
-	-- Commands which modify the VCF will add an entry to the header recording the command line used,
+	* Input can be in any format that `htslib` can handle -- VCF, bgzipped VCF, BCF, etc.
+	* Commands which modify the VCF will add an entry to the header recording the command line used,
 	the current working directory and a timestamp.
 	"""
 
@@ -789,6 +995,9 @@ parser.add_argument("-n","--nsites", type = int,
 parser.add_argument("--chunk-size", type = int,
 					default = 2000,
 					help = "when loading genotypes into memory, process this many sites per chunk [default: %(default)d]")
+parser.add_argument("--seed", type = int,
+					default = 1,
+					help = "random number seed; only affects stuff involving sampling [default: %(default)d]")
 parser.add_argument("-q","--quiet", action = "store_true",
 					help = "suppress logging messages")
 
@@ -854,6 +1063,7 @@ pca_parser.add_argument("--randomized", action = "store_true",
 					help = "use fast randomized SVD algorithm")
 pca_parser.set_defaults(func = pca_wsaf, command = "pca")
 
+## genetic distance from WSAFs, weighted for LD
 dist_parser = subparsers.add_parser("dist",
 	description = "Calculate LD-weighted genetic distances from within-sample allele frequencies according to method of Amato et al. (PMC4786412).",
 	parents = [parser])
@@ -862,14 +1072,16 @@ dist_parser.add_argument("-r","--rsq-cutoff", type = float,
 					help = "ignore site pairs with r^2 < cutoff when assigning weights [default: %(default)f]")
 dist_parser.set_defaults(func = calc_weighted_dist, command = "dist")
 
+## polarize alleles using ancestral/outgroup genome in fasta format
 anc_parser = subparsers.add_parser("polarize",
 	description = "Polarize alleles as ancestral vs derived, based on outgroup sequence",
 	parents = [parser])
 anc_parser.add_argument("-f","--fasta",
 					required = True,
-					help = "ancestral genome fasta file")
+					help = "ancestral genome fasta file, **in same coordinates as reference**")
 anc_parser.set_defaults(func = polarize_anc_vs_der, command = "polarize")
 
+## count number of derived calls per sample
 anc_parser = subparsers.add_parser("derived",
 	description = "Count proportion of calls for derived vs ancestral allele, using WSAF (default) or hard calls",
 	parents = [parser])
@@ -881,6 +1093,7 @@ anc_parser.add_argument("--calls", action = "store_true",
 					help = "count hard genotype calls rather than supporting reads [default: %(default)s]")
 anc_parser.set_defaults(func = count_derived, command = "derived")
 
+## identify variants where non-ref allele is present in only specified subset of samples
 priv_parser = subparsers.add_parser("private",
 	description = "Annotate sites as 'private' in subset of samples.",
 	parents = [parser])
@@ -902,6 +1115,32 @@ priv_parser.add_argument("-c","--min-count", type = int,
 					default = 1,
 					help = "minimum supporting observations (reads or chromosomes) in focal sample(s) for allele to be called 'present' [default: %(default)d]")
 priv_parser.set_defaults(func = flag_private, command = "private")
+
+## calculate n-dimensional SFS
+sfs_parser = subparsers.add_parser("sfs",
+	description = "Estimate unfolded SFS by sampling from either read counts or hard calls.",
+	parents = [parser])
+sfs_parser.add_argument("-p","--pops", type = argparse.FileType("rU"),
+					help = "file of (sample ID, population) tuples [default: all samples as one population]")
+sfs_parser.add_argument("--reads", action = "store_true",
+					default = False,
+					help = "count supporting reads (NB: site-wise, not haplotype-aware) [default: %(default)s]")
+sfs_parser.add_argument("--calls", action = "store_true",
+					default = False,
+					help = "count hard genotype calls rather than supporting reads [default: %(default)s]")
+sfs_parser.add_argument("--ref-is-ancestral", action = "store_true",
+					default = False,
+					help = "assume reference allele is the ancestral one (FOR TESTING ONLY)")
+sfs_parser.set_defaults(func = calc_sfs, command = "sfs")
+
+## keep only every nth site
+thin_parser = subparsers.add_parser("thin",
+	description = "Reduce number of sites in VCF by emitting every nth site",
+	parents = [parser])
+thin_parser.add_argument("-Q", "--every", type = int,
+						default = 10,
+						help = "emit one site per this many visited [default: %(default)d]")
+thin_parser.set_defaults(func = thin_sites, command = "thin")
 
 ## parse command line
 args = parser.parse_args()

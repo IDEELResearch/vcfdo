@@ -83,6 +83,7 @@ This produces a PCA result in a pair of files `my_pca.pca` (sample projections) 
 * All utilities that produce VCF output leave a "breadcrumb" in the VCF header documenting the command-line call, current working directory and timestamp.
 * All utilities that produce VCF output will dump uncompressed VCF, starting with a valid header, to `stdout`.
 * Default input for all utilities is `stdin`. An unfortunate side-effect that I haven't been able to fix is that calling `vcfdo <command>` with no arguments and no piped input will cause the command-line to hang until the user interrupts it with `Ctrl-D` (not `Ctrl-C`; why??)
+* When a list of samples is required at the command line, `vcfdo` will check it against the VCF header and remove duplicates. Samples requsted but not present in the VCF are ignored with a warning.
 
 ## Definitions and conventions
 As the target audience for this tool is people working on _Plasmodium_ spp, heavy use is made of some quantities that are bespoke to malariologists. These include:
@@ -99,6 +100,23 @@ As the target audience for this tool is people working on _Plasmodium_ spp, heav
 These were introduced (I think) in [Manske _et al_ (2012) _Nature Genetics_ **487**: 375-379 (PMC3738909)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3738909/).
 
 To avoid spawning not-a-number warnings, `vcfdo` encodes missing values for these quantities as -1.
+
+## Order of operations
+The design of `vcfdo` is modular: multiple tools may need to be strung together to accomplish a given task. In most cases this comes down to creating and then using site- or genotype-level annotations in the VCF. The table below summarises the annotations required and/or produced by each tool in `vcfdo`.
+
+| tool | requires | adds | recalculates
+--- | --- | --- | ---
+| `thin` | none | none | none
+| `wsaf` | `FORMAT/AD` | `FORMAT/WSAF`, `FORMAT/WSMAF`, `INFO/PLAF`, `INFO/PLMAF` | none
+| `fws` | `FORMAT/WSAF` | none | `INFO/PLMAF`
+| `pca` | `FORMAT/WSAF` | none | `INFO/PLMAF`
+| `dist` | `FORMAT/WSAF` | none | none
+| `polarize` | none | `INFO/AA` | none
+| `derived` | `INFO/AA` | none | none
+| `private` | `FORMAT/WSAF` (with `--reads`) | `INFO/{flag}`, where `{flag}` is specified by user | none
+| `sfs` | `INFO/AA` (unless `--ref-is-ancestral`), `FORMAT/WSAF` (with `--reads`) | none | none
+
+Given the constraints implied above, a reasonable compromise between time wasted on re-calculation and space wasted on a bloated VCF would be to run `vcfdo wsaf` and `vcfdo polarize` on a "master" call set and save the result. Then, since `INFO/AA` (ancestral allele) and `FORMAT/WSAF` (within-sample allele frequency) are invariant to subsetting on rows or columns, all other analyses can be done on a stream later.
 
 ## Bug reports
 If you uncover an error or unexpected behavior, of which there will be plenty, please file a Github issue and contact the author via Slack.
