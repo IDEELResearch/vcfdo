@@ -87,11 +87,11 @@ def calc_wsaf(vcf, log, ns, **kwargs):
 				plmaf = plaf
 				unw = dp_alt_all
 			else:
-				plmaf = 1 - plmaf
+				plmaf = 1 - plaf
 				unw = dp_ref_all
 			site.INFO["PLAF"] = plaf
 			site.INFO["PLMAF"] = plmaf
-			site.INFO["UNW"] = unw
+			site.INFO["UNW"] = int(unw)
 
 			# now undo masking of NaNs
 			wsaf[ np.isnan(wsaf) ] = -1
