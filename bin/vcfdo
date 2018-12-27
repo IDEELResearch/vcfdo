@@ -1002,6 +1002,7 @@ def calc_sfs(vcf, log, ns, **kwargs):
 			sampled = np.zeros(len(ssz), dtype = np.int)
 			for ii,pop in enumerate(pop_order):
 				these_counts = counts[ pops[pop] ]
+				print(these_counts)
 				if np.all(these_counts == -1):
 					continue
 				maf = np.average(these_counts[ these_counts > -1 ])
