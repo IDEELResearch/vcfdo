@@ -73,14 +73,26 @@ def calc_wsaf(vcf, log, ns, **kwargs):
 			## are there actually any reads for the non-ref alleles?
 			dp_tot_all = np.sum(dp)
 			dp_alt_all = np.sum(dp[:,1:])
-			unw = dp_alt_all/dp_tot_all
-			site.INFO["UNW"] = min(unw, 1-unw)
+			dp_ref_all = np.sum(dp[:,0])
 
 			wsmaf = dp_maj / dp_tot
 			wsaf = np.ma.masked_invalid(dp_alt / (dp_ref + dp_alt), )
+
+			## figure out which allele is minor in population
+			## NB: for UNW, record number of reads supporting minor allele -- which may be MORE than major allele,
+			##  depending on distribution per-sample coverage. But we want evidence of favor of rarest allele.
 			plaf = np.average(wsaf)
+			plmaf = -1
+			if plaf < 0.5:
+				plmaf = plaf
+				unw = dp_alt_all
+			else:
+				plmaf = 1 - plmaf
+				unw = dp_ref_all
 			site.INFO["PLAF"] = plaf
-			site.INFO["PLMAF"] = min(plaf, 1-plaf)
+			site.INFO["PLMAF"] = plmaf
+			site.INFO["UNW"] = unw
+
 			# now undo masking of NaNs
 			wsaf[ np.isnan(wsaf) ] = -1
 			wsmaf[ np.isnan(wsmaf) ] = -1
