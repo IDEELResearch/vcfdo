@@ -120,5 +120,10 @@ The design of `vcfdo` is modular: multiple tools may need to be strung together 
 
 Given the constraints implied above, a reasonable compromise between time wasted on re-calculation and space wasted on a bloated VCF would be to run `vcfdo wsaf` and `vcfdo polarize` on a "master" call set and save the result. Then, since `INFO/AA` (ancestral allele) and `FORMAT/WSAF` (within-sample allele frequency) are invariant to subsetting on rows or columns, all other analyses can be done on a stream later.
 
+## Reproducibility
+Most operations in `vcfdo` are deterministic up to floating-point weirdness.
+
+The allele-count sampler in `vcfdo sfs` uses the Mersenne twister RNG in Numpy. The seed can be set on the command line with `--seed`, and is fixed to `1` by default -- which means successive calls with the same input will return the same output. That's good for reproducibility but definitely _not_ the desired behavior if one actually wants to sample from the SFS. To allow auto-seeding of the RNG (ie. allow different output each run) pass a seed strictly less than 0.
+
 ## Bug reports
 If you uncover an error or unexpected behavior, of which there will be plenty, please file a Github issue and contact the author via Slack.
