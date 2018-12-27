@@ -24,7 +24,7 @@ def calc_wsaf(vcf, log, ns, **kwargs):
 
 	vcf.add_info_to_header({ "ID": "PLAF", "Description": "Population-level ALT allele frequency weighted for mixed samples", "Number": 1, "Type": "Float" })
 	vcf.add_info_to_header({ "ID": "PLMAF", "Description": "Population-level minor allele frequency weighted for mixed samples", "Number": 1, "Type": "Float" })
-	vcf.add_info_to_header({ "ID": "UNW", "Description": "Population-level evidence for minor allele, as if all reads were pooled", "Number": 1, "Type": "Float" })
+	vcf.add_info_to_header({ "ID": "UNW", "Description": "Population-level evidence for minor allele, as if all reads were pooled", "Number": 1, "Type": "Int" })
 	vcf.add_format_to_header({ "ID": "WSAF", "Description": "Within-sample allele frequency weighted for mixed samples", "Number": 1, "Type": "Float" })
 	vcf.add_format_to_header({ "ID": "WSMAF", "Description": "Within-sample MAJOR allele frequency weighted for mixed samples", "Number": 1, "Type": "Float" })
 
