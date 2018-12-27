@@ -1028,6 +1028,7 @@ def calc_sfs(vcf, log, ns, **kwargs):
 
 	log.info("Done.")
 	log.info("\t{: >12d} had usable data".format(nused))
+	log.info("\t{: >12d} had undefined ancestral allele".format(nused))
 	if args.reads:
 		log.info("\t{: >12d} had no WSAF annotation".format(nnodp))
 	log.info("\t{: >12d} had >2 alleles".format(nmulti))
