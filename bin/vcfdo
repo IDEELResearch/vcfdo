@@ -169,7 +169,7 @@ def calc_fws(vcf, log, ns, **kwargs):
 		#	continue
 
 		wsaf = np.ma.masked_values(site.format("WSAF"), -1)
-		plmaf = min(np.average(wsaf), 1 - np.average(wsaf))
+		plmaf = float( min(np.average(wsaf), 1 - np.average(wsaf)) )
 		#plmaf = site.INFO["PLMAF"]
 		H_px = 1 - (plmaf**2 + (1 - plmaf)**2)
 		H_sx = 1 - (np.power(wsaf, 2) + np.power((1 - wsaf), 2))
