@@ -169,7 +169,7 @@ def calc_fws(vcf, log, ns, **kwargs):
 		#	continue
 
 		wsaf = np.ma.masked_values(site.format("WSAF"), -1)
-		plmaf = float( min(np.average(wsaf), 1 - np.average(wsaf)) )
+		plmaf = min(np.average(wsaf), 1 - np.average(wsaf))
 		#plmaf = site.INFO["PLMAF"]
 		H_px = 1 - (plmaf**2 + (1 - plmaf)**2)
 		H_sx = 1 - (np.power(wsaf, 2) + np.power((1 - wsaf), 2))
@@ -197,8 +197,7 @@ def calc_fws(vcf, log, ns, **kwargs):
 		X = H_sx[ ~H_sx.mask ]
 		X = X.reshape(len(X), 1)
 		y = H_p[ ~H_sx.mask ]
-		#print(X.shape, y.shape)
-		beta, sse, rank, sv = np.linalg.lstsq(y, X, rcond = None) # `rcond` passed to avoid FutureWarning
+		beta, sse, rank, sv = np.linalg.lstsq(y, X, rcond = -1) # `rcond` passed explicitly to avoid FutureWarning
 		sigma2 = np.sum((y - np.dot(X, beta))**2) / (X.shape[0] - 1)
 		C = sigma2 * np.linalg.pinv(np.dot(X.T, X)) # covariance matrix
 		se = np.sqrt(np.diag(C)) # standard error
