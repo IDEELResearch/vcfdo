@@ -20,6 +20,47 @@ from cyvcf2 import VCF
 from allel import pca, randomized_pca
 from pyfaidx import Fasta
 
+def block_jackknife(values, statistic, block_size = 1):
+
+	## how long is input? allow to be multidimensional, assume replicates are in rows
+	n = values.shape[0]
+	#print("values have shape {}".format(values.shape))
+
+	## how many blocks, respecting (approx) the block size?
+	m = block_size
+	M = int(n/m)+1
+
+	## split into a list of arrays, each item a block
+	blocks = np.array_split(np.indices((n,))[0], M)
+	blocks = [ _ for _ in blocks if _.shape[0] > 0 ]
+	M = len(blocks)
+
+	## not enough blocks to get standard errors? too bad
+	if M < 3:
+		return np.nan, np.tile(np.nan, M)
+
+	## loop on blocks
+	theta = np.zeros(M)
+	for jj, delete_j in enumerate(blocks):
+		## use mask out this block
+		idx = np.tile(True, n)
+		#print("To delete = {}".format(delete_j))
+		idx[delete_j] = False
+		keep = values[ idx,... ]
+		#print("Keepers have shape {}".format(keep.shape))
+		## calculate statistic on remaining values
+		theta[jj] = statistic(keep)
+		#print("theta_j = {}".format(theta[jj]))
+
+	## calculate standard error
+	theta_bar = np.mean(theta)
+	#print("theta_bar = {}".format(theta_bar))
+	se = np.sqrt( ((M-1)/M) * np.sum(np.power(theta - theta_bar, 2)) )
+	#print("se = {}".format(se))
+
+	## return se and blockwise stats
+	return se, theta
+
 def calc_wsaf(vcf, log, ns, **kwargs):
 
 	vcf.add_info_to_header({ "ID": "PLAF", "Description": "Population-level ALT allele frequency weighted for mixed samples", "Number": 1, "Type": "Float" })
@@ -133,6 +174,7 @@ def calc_wsaf(vcf, log, ns, **kwargs):
 def calc_fws(vcf, log, ns, **kwargs):
 
 	log.info("Processing VCF file: <{}>".format(kwargs["infile"]))
+	args = argparse.Namespace(**kwargs)
 
 	## loop on VCF and add 'WSAF','PLAF','PLMAF' tags
 	ii = 0
@@ -185,24 +227,46 @@ def calc_fws(vcf, log, ns, **kwargs):
 	log.info("\t{: >12d} total sites\n".format(ii))
 
 	log.info("Calculating F_ws ...")
+	if args.jackknife is not None:
+		log.info(" [ standard errors estimated by block jackknife in blocks of size ~= {} ]".format(args.jackknife))
+	else:
+		log.info(" [ asymptotic standard errors ]")
 	## matrices of H_px and H_sx
 	H_p = np.array(H_p, dtype = np.float).reshape(len(H_p), 1)
 	H_s = np.ma.asanyarray(H_s)[:,:,0]
 	#print(np.sum(H_s.mask))
 	#print(H_s.shape)
 
+	def do_fws(Z, do_se = False):
+		y = Z[:,0,None] # None stops numpy dropping a dimension here
+		X = Z[:,1:]
+		beta, sse, rank, sv = np.linalg.lstsq(y, X, rcond = -1) # `rcond` passed explicitly to avoid FutureWarning
+		if do_se:
+			sigma2 = np.sum((y - np.dot(X, beta))**2) / (X.shape[0] - 1)
+			C = sigma2 * np.linalg.pinv(np.dot(X.T, X)) # covariance matrix
+			se = np.sqrt(np.diag(C)) # standard error
+		F_ws = 1 - beta
+		if do_se:
+			return F_ws[0,0], se[0]
+		else:
+			return F_ws[0,0]
+
 	## do no-intercept regression of H_sx on H_px
-	for ii in range(0, len(vcf.samples)):
+	for ii,iid in enumerate(vcf.samples):
 		H_sx = H_s[:,ii]
 		X = H_sx[ ~H_sx.mask ]
 		X = X.reshape(len(X), 1)
 		y = H_p[ ~H_sx.mask ]
-		beta, sse, rank, sv = np.linalg.lstsq(y, X, rcond = -1) # `rcond` passed explicitly to avoid FutureWarning
-		sigma2 = np.sum((y - np.dot(X, beta))**2) / (X.shape[0] - 1)
-		C = sigma2 * np.linalg.pinv(np.dot(X.T, X)) # covariance matrix
-		se = np.sqrt(np.diag(C)) # standard error
-		F_ws = 1 - beta
-		print(vcf.samples[ii], F_ws[0,0], se[0], np.sum(~H_sx.mask), sep = "\t")
+		Z = np.hstack((y,X))
+		if Z.shape[0] > 0:
+			if args.jackknife is not None:
+				se, _ = block_jackknife(Z, do_fws, args.jackknife)
+				F_ws = do_fws(Z)
+			else:
+				F_ws, se = do_fws(Z, True)
+			print(iid, F_ws, se, np.sum(~H_sx.mask), sep = "\t")
+		else:
+			print(iid, np.nan, np.nan, 0, sep = "\t")
 
 	log.info("Done.\n")
 
@@ -1151,10 +1215,13 @@ wsaf_parser.add_argument("--set-filter", type = float,
 wsaf_parser.set_defaults(func = calc_wsaf, command = "wsaf")
 
 ## calculate F_ws from WSAF
-wsaf_parser = subparsers.add_parser("fws",
-	description = "Calculate within-sample allele 'inbreeding'-like coefficient F_ws, using precomputed WSAFs.",
+fws_parser = subparsers.add_parser("fws",
+	description = "Calculate within-sample allele 'inbreeding'-like coefficient F_ws, using precomputed WSAFs. Optionally get standard errors by block jackknife.",
 	parents = [parser])
-wsaf_parser.set_defaults(func = calc_fws, command = "fws")
+fws_parser.add_argument("-j","--jackknife", type = int,
+					default = None,
+					help = "estimate standard errors by block jackknife with this block size (number of sites) [default: use asymptotics]")
+fws_parser.set_defaults(func = calc_fws, command = "fws")
 
 ## summarise depth per sample per called site
 dp_parser = subparsers.add_parser("depthsummary",
