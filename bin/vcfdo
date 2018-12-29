@@ -17,7 +17,8 @@ from re import split as resplit
 from datetime import datetime as dt
 from collections import defaultdict, OrderedDict
 from cyvcf2 import VCF
-from allel import pca, randomized_pca
+from allel import pca, randomized_pca, pairwise_distance
+from scipy.spatial.distance import squareform
 from pyfaidx import Fasta
 
 def block_jackknife(values, statistic, block_size = 1):
@@ -416,6 +417,7 @@ def calc_weighted_dist(vcf, log, ns, **kwargs):
 	log.info("Calculating pairwise distances using WSAFs ...")
 	combos = list( it.combinations(range(0, len(vcf.samples)), 2) )
 	log.info("\t[{} combinations]".format(len(combos)))
+	formatter = "{:0." + str(args.digits) + "f}"
 	#D = np.zeros( (len(vcf.samples), len(vcf.samples)), dtype = np.float )
 	ii = 0
 	for sa,sb in combos:
@@ -428,7 +430,84 @@ def calc_weighted_dist(vcf, log, ns, **kwargs):
 		nz = np.sum(~d_i.mask)
 		if not ii % 100:
 			log.info("\t... {} pairs done ...".format(ii))
-		print(vcf.samples[sa], vcf.samples[sb], nz, d, sep = "\t")
+		print(vcf.samples[sa], vcf.samples[sb], nz, formatter.format(d), sep = "\t")
+
+	log.info("Done.\n")
+
+def calc_ibs_dist(vcf, log, ns, **kwargs):
+
+	args = argparse.Namespace(**kwargs)
+
+	CHUNK_SIZE = args.chunk_size
+	def give_chunk():
+		return np.zeros((CHUNK_SIZE,len(vcf.samples)), dtype = np.float)
+
+	geno = give_chunk()
+	geno_imputed = give_chunk()
+
+	## loop on VCF and add take sample depths
+	ii = 0
+	nused = 0
+	logger.info("Reading genotype data in chunks of size {} ...".format(CHUNK_SIZE))
+	for site in vcf:
+
+		ii += 1
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites [{} kept] ...".format(ii-1, nused))
+
+		if ii > ns and ns > -1:
+			ii -= 1
+			break
+
+		this_geno = site.gt_types/site.ploidy
+		ac = np.sum(np.ma.masked_values(this_geno, 3))
+		an = np.sum(this_geno == 3)
+		if ac == 2*an or ac == 0:
+			continue
+		nused += 1
+
+		if nused >= geno.shape[0]:
+			log.debug("Increasing array allocation ... ")
+			geno = np.append( geno, give_chunk(), axis = 0 )
+			geno_imputed = np.append( geno_imputed, give_chunk(), axis = 0 )
+
+		## get genotype calls as number of alt alleles
+		this_geno = site.gt_types/site.ploidy
+		geno[nused,:] = this_geno[:]
+
+		## impute PLAF for missing values
+		plaf = np.average(this_geno[ this_geno != 3 ])
+		ww = this_geno[:]
+		ww[ ww == 3 ] = plaf
+		geno_imputed[nused,:] = ww
+
+	geno = geno[ :nused, : ]
+	geno_imputed = geno_imputed[ :nused, : ]
+	log.info("Dimensions of full genotype matrix: {}".format(geno_imputed.shape))
+
+	log.info("Calculating pairwise distances ...")
+	D = squareform( pairwise_distance(geno_imputed, "hamming") )
+	D = 1 - D
+	formatter = "{:0." + str(args.digits) + "f}"
+
+	if not args.flatten:
+		print(".", *vcf.samples, sep = "\t")
+		for jj,iid in enumerate(vcf.samples):
+			rounded = [ formatter.format(_) for _ in D[jj,:] ]
+			print(vcf.samples[jj], *rounded, sep = "\t")
+	else:
+		combos = list( it.combinations(range(0, len(vcf.samples)), 2) )
+		log.info("\t[{} combinations]".format(len(combos)))
+		ii = 0
+		for sa,sb in combos:
+			ii += 1
+			fa = np.ma.masked_values(geno[:,sa], 3)
+			fb = np.ma.masked_values(geno[:,sb], 3)
+			nz = np.sum(np.logical_and(geno[:,sa] != 3, geno[:,sb] != 3))
+			d = D[sa,sb]
+			if not ii % 100:
+				log.info("\t... {} pairs done ...".format(ii))
+			print(vcf.samples[sa], vcf.samples[sb], nz, formatter.format(d), sep = "\t")
 
 	log.info("Done.\n")
 
@@ -1176,6 +1255,7 @@ def root_help_message(name = None):
 
 	  --- Relatedness/ordination
 	      dist              calculate LD-weighted pairwise distances from within-sample allele frequencies
+	      ibs               calculate simple identity-by-state (IBS) matrix from hard calls at polymorphic sites only
 	      pca               perform PCA using within-sample allele frequencies instead of hard calls
 
 	Notes:
@@ -1274,10 +1354,24 @@ pca_parser.set_defaults(func = pca_wsaf, command = "pca")
 dist_parser = subparsers.add_parser("dist",
 	description = "Calculate LD-weighted genetic distances from within-sample allele frequencies according to method of Amato et al. (PMC4786412).",
 	parents = [parser])
+dist_parser.add_argument("-d","--digits", type = int,
+					default = 5,
+					help = "report distance to this many decimal places [default: %(default)d]")
 dist_parser.add_argument("-r","--rsq-cutoff", type = float,
 					default = 0.10,
 					help = "ignore site pairs with r^2 < cutoff when assigning weights [default: %(default)f]")
 dist_parser.set_defaults(func = calc_weighted_dist, command = "dist")
+
+## quick identity-by-state on hard genotypes
+ibs_parser = subparsers.add_parser("ibs",
+	description = "Calculate identity-by-state (IBS) matrix from hard genotype calls, without weights (but only polymorphic sites).",
+	parents = [parser])
+ibs_parser.add_argument("-d","--digits", type = int,
+					default = 3,
+					help = "report IBS to this many decimal places [default: %(default)d]")
+ibs_parser.add_argument("--flatten", action = "store_true",
+					help = "report one pair of individuals per line, rather than square matrix")
+ibs_parser.set_defaults(func = calc_ibs_dist, command = "ibs")
 
 ## polarize alleles using ancestral/outgroup genome in fasta format
 anc_parser = subparsers.add_parser("polarize",
