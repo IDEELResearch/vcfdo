@@ -17,7 +17,8 @@ from re import split as resplit
 from datetime import datetime as dt
 from collections import defaultdict, OrderedDict
 from cyvcf2 import VCF
-from allel import pca, randomized_pca, pairwise_distance
+from allel import pca, randomized_pca, pairwise_distance, locate_unlinked
+#from allel.stats import rogers_huff_r
 from scipy.spatial.distance import squareform
 from pyfaidx import Fasta
 
@@ -1226,6 +1227,100 @@ def thin_sites(vcf, log, ns, **kwargs):
 	log.info("\t------------")
 	log.info("\t{: >12d} total sites".format(ii))
 
+def prune_sites_by_ld(vcf, log, ns, **kwargs):
+
+	## load args into a namespace, so I don't have to recode so much stuff
+	args = argparse.Namespace(**kwargs)
+
+	## write outgoing VCF header
+	sys.stdout.write(str(vcf.raw_header))
+
+	CHUNK_SIZE = args.chunk_size
+	def give_chunk():
+		return np.zeros((CHUNK_SIZE,len(vcf.samples)), dtype = np.float)
+
+	log.info("Performing LD pruning to r^2 <= {:0.3f} in windows of {} sites (stepping by {})".format(args.r_squared, args.window, args.step))
+	## straight from <http://alimanfoo.github.io/2015/09/28/fast-pca.html>
+	def ld_prune(gn, size, step, threshold = 0.1, n_iter = 1):
+		idx = np.arange(gn.shape[0])
+		for i in range(n_iter):
+			loc_unlinked = locate_unlinked(gn, size=size, step=step, threshold=threshold)
+			n = np.count_nonzero(loc_unlinked)
+			n_remove = gn.shape[0] - n
+			log.info("\t ... iteration {}: retaining {} of {} sites".format(i, n, gn.shape[0]))
+			gn = gn[ loc_unlinked,... ]
+			idx = idx[ loc_unlinked ]
+		return idx
+
+	## read genotypes to matrix, one chromosome at a time
+	ii = 0
+	nkept = 0
+	ntot = 0
+	log.info("Processing VCF file ...")
+	last_chrom = None
+	pos = []
+	geno = give_chunk()
+
+	## while instead of for-loop to avoid gymnasitcs at ends of chrosomes
+	# while True:
+	#
+	# 	# consume next site
+	# 	try:
+	# 		site = next(vcf)
+	# 	except StopIteration as e:
+	# 		break
+
+	for site in vcf:
+		# increment counters
+		ii += 1
+		nkept += 1
+
+		if (ii-1) and not (ii-1) % 1000:
+			log.info("\t... processed {} sites ...".format(ii-1))
+
+		if ii > ns and ns > -1:
+			ii -= 1
+			nkept -= 1
+			break
+
+		# increase array allocation, if needed
+		if nkept >= geno.shape[0]:
+			log.debug("Increasing array allocation {} --> {} ... ".format(geno.shape[0], geno.shape[0]+CHUNK_SIZE))
+			geno = np.append( geno, give_chunk(), axis = 0 )
+
+		if last_chrom and last_chrom != site.CHROM:
+			# started new chromosome; calculate LD, reset containers and keep going
+			log.info("Pruning sites on chromosome '{}'".format(last_chrom))
+			keep = ld_prune(geno[:(nkept-1),:], args.window, args.step, args.r_squared, args.niter)
+			log.debug("{} {} {}".format(nkept-1, np.max(keep), len(pos)))
+			for jj in keep:
+				ntot += 1
+				sys.stdout.write(str(pos[jj]))
+			geno = give_chunk()
+			pos = []
+			nkept = 0
+			last_chrom = str(site.CHROM)
+			continue
+
+		last_chrom = str(site.CHROM)
+		geno[nkept,:] = site.gt_types/2 * site.ploidy
+		geno[nkept, site.gt_types == 3 ] = np.nan
+		pos.append(str(site))
+
+	## done with file; flush buffers
+	log.info("Pruning sites on chromosome '{}'".format(last_chrom))
+	keep = ld_prune(geno[:nkept,:], args.window, args.step, args.r_squared, args.niter)
+	log.debug("{} {} {}".format(nkept, np.max(keep), len(pos)))
+	for jj in keep:
+		ntot += 1
+		sys.stdout.write(str(pos[jj]))
+
+	log.info("Done.")
+	log.info("\t{: >12d} sites in approx linkage equilibrium ({:0.3f}%)".format(ntot, 100*ntot/ii))
+	log.info("\t{: >12d} pruned for LD".format(ii-ntot))
+	log.info("\t------------")
+	log.info("\t{: >12d} total sites".format(ii))
+
 
 ## root-level argument parser
 def root_help_message(name = None):
@@ -1241,6 +1336,7 @@ def root_help_message(name = None):
 
 	  --- Downsampling
 	      thin              emit every nth site, possibly with random starting point
+	      prune             greedy LD-pruning in sliding windows
 
 	  --- Ancestral alleles
 	      polarize          define ancestral alleles based on outgroup sequence
@@ -1283,7 +1379,9 @@ parser.add_argument("--seed", type = int,
 					default = 1,
 					help = "random number seed for reproducibility, values < 0 use auto seed; only affects stuff involving sampling [default: %(default)d]")
 parser.add_argument("-q","--quiet", action = "store_true",
-					help = "suppress logging messages")
+					help = "see fewer logging messages")
+parser.add_argument("-v","--verbose", action = "store_true",
+					help = "see more logging messages")
 
 ## calculate WSAF, PLAF, PLMAF
 wsaf_parser = subparsers.add_parser("wsaf",
@@ -1449,12 +1547,32 @@ thin_parser.add_argument("-Q", "--every", type = int,
 						help = "emit one site per this many visited [default: %(default)d]")
 thin_parser.set_defaults(func = thin_sites, command = "thin")
 
+## keep only every nth site
+prune_parser = subparsers.add_parser("prune",
+	description = "Reduce number of sites in VCF by emitting every nth site",
+	parents = [parser])
+prune_parser.add_argument("-w", "--window", type = int,
+						default = 100,
+						help = "window size in number of sites [default: %(default)d]")
+prune_parser.add_argument("-s", "--step", type = int,
+						default = 50,
+						help = "offset between adjacent windows [default: %(default)d]")
+prune_parser.add_argument("-r", "--r-squared", type = float,
+						default = 0.1,
+						help = "retain sites with r^2 below this threshhold [default: %(default)f]")
+prune_parser.add_argument("-m", "--niter", type = int,
+						default = 5,
+						help = "perform this many rounds of pruning in each window before giving up [default: %(default)d]")
+prune_parser.set_defaults(func = prune_sites_by_ld, command = "prune")
+
 ## parse command line
 args = parser.parse_args()
 
 ## set up log trace
 if args.quiet:
 	logging.basicConfig(level = logging.CRITICAL)
+elif args.verbose:
+	logging.basicConfig(level = logging.DEBUG)
 else:
 	logging.basicConfig(level = logging.INFO)
 logging.StreamHandler(stream = sys.stderr)
