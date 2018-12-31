@@ -24,27 +24,30 @@ usage:
 	Commands:
 
 	  --- Basic statistics
-	      missing           rates of missing calls by site or by sample
-	      depthsummary      quantiles of read depth (at called sites) per sample
-	      filtersummary     tallies of filter status by site or by sample
+		  missing           rates of missing calls by site or by sample
+		  depthsummary      quantiles of read depth (at called sites) per sample
+		  filtersummary     tallies of filter status by site or by sample
 
 	  --- Downsampling
-	      thin              emit every nth site, possibly with random starting point
+		  thin              emit every nth site, possibly with random starting point
+		  prune             greedy LD-pruning in sliding windows
 
 	  --- Ancestral alleles
-	      polarize          define ancestral alleles based on outgroup sequence
-	      titv              annotate sites as transitions or transversions; flag gBGC candidates
-	      derived           count derived alleles per sample, using either read counts or hard calls
+		  polarize          define ancestral alleles based on outgroup sequence
+		  titv              annotate sites as transitions or transversions; flag gBGC candidates
+		  derived           count derived alleles per sample, using either read counts or hard calls
 
 	  --- Allele frequencies
-	      wsaf              calculate within-sample allele frequency (WSAF) and related quantities from read counts
-	      fws               estimate pseudo-inbreeding coefficient F_ws ("within-sample relatedness") and standard errors
-	      private           annotate sites where non-ref allele is only found in certain subset of samples
-	      sfs               approximate the n-dimensional unfolded SFS by sampling
+		  wsaf              calculate within-sample allele frequency (WSAF) and related quantities from read counts
+		  fws               estimate pseudo-inbreeding coefficient F_ws ("within-sample relatedness")
+		  private           annotate sites where non-ref allele is only found in certain subset of samples
+		  sfs               approximate the n-dimensional unfolded SFS by sampling
 
 	  --- Relatedness/ordination
-	      dist              calculate LD-weighted pairwise distances from within-sample allele frequencies
-	      pca               perform PCA using within-sample allele frequencies instead of hard calls
+		  dist              calculate LD-weighted pairwise distances from within-sample allele frequencies
+		  ibs               calculate simple identity-by-state (IBS) matrix from hard calls at polymorphic sites only
+		  pca               perform PCA using within-sample allele frequencies instead of hard calls
+
 ```
 
 Some options are common to all commands; these are
@@ -61,6 +64,7 @@ Some options are common to all commands; these are
 --seed SEED           random number seed; only affects stuff involving
 					  sampling [default: 1]
 -q, --quiet           suppress logging messages
+-v, --verbose		  see more logging messages
 ```
 
 All of the utilities in `vcfdo` work on streams, and are intended to be used that way. The goal is to store on disk only those attributes of a VCF that are invariant under subsetting by rows (sites) or columns (samples). Everything else can be calculated on the fly as needed. Simple filtering operations such as those available in `bcftools view` are not duplicated in `vcfdo` -- wherever possible, it will be more efficient to do what you can with `bcftools view` and stream the result to `vcfdo`.
@@ -90,11 +94,12 @@ This produces a PCA result in a pair of files `my_pca.pca` (sample projections) 
 As the target audience for this tool is people working on _Plasmodium_ spp, heavy use is made of some quantities that are bespoke to malariologists. These include:
 
 * Genotype-level quantities (these live in the `FORMAT` field)
-	* **WSAF** (within-sample allele frequency) -- proportion of reads at this site supporting all non-reference alleles -- float [0,1]
+	* **WSAF** (within-sample allele frequency) -- proportion of reads at this site supporting _all_ non-reference alleles -- float [0,1]
 	* **WSMAF** (within-sample _MAJOR_ allele frequency) -- proportion of reads at this site supporting the most-abundant allele, whichever it is -- float [0,1]
 * Site-level quantities (these live in the `INFO` field)
 	* **PLAF** (population-level allele frequency) -- average over per-sample WSAFs at this site -- float [0,1]
 	* **PLMAF** (population-level _MINOR_ allele frequency) -- min(PLAF, 1 - PLAF) -- float [0,1]
+	* **UNW** (unweighted non-reference allele count) -- absolute evidence for non-reference allele -- int [0,inf)
 * Sample-level quantities (don't live in VCF):
 	* **_F_<sub>ws</sub>** (pseudo-inbreeding coefficient within a sample) -- normalized difference between observed WSAF and expected WSAF if complex infections occurred Hardy-Weinberg-style -- float [0,1]
 
@@ -108,10 +113,12 @@ The design of `vcfdo` is modular: multiple tools may need to be strung together 
 | tool | requires | adds | recalculates
 --- | --- | --- | ---
 | `thin` | none | none | none
+| `prune` | none | none | none
 | `wsaf` | `FORMAT/AD` | `FORMAT/WSAF`, `FORMAT/WSMAF`, `INFO/PLAF`, `INFO/PLMAF` | none
 | `fws` | `FORMAT/WSAF` | none | `INFO/PLMAF`
 | `pca` | `FORMAT/WSAF` | none | `INFO/PLMAF`
 | `dist` | `FORMAT/WSAF` | none | none
+| `ibs` | none | none | none
 | `polarize` | none | `INFO/AA` | none
 | `titv` | `INFO/AA` | `INFO/Transversion`, `INFO/StrongWeak`, `INFO/BGC` | none
 | `derived` | `INFO/AA` | none | none
