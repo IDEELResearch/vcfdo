@@ -15,7 +15,10 @@ setup(
 	install_requires = [
 		"cyvcf2",
 		"scikit-allel",
-		"pyfaidx"
+		"numpy",
+		"scipy",
+		"pyfaidx",
+		"pybedtools"
 	],
 	zip_safe = False
 )

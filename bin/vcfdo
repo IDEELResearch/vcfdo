@@ -13,6 +13,7 @@ import logging
 
 np.warnings.filterwarnings("ignore")
 
+import pybedtools as pbt
 from re import split as resplit
 from datetime import datetime as dt
 from collections import defaultdict, OrderedDict
@@ -460,7 +461,7 @@ def calc_ibs_dist(vcf, log, ns, **kwargs):
 			ii -= 1
 			break
 
-		this_geno = site.gt_types/site.ploidy
+		this_geno = site.gt_types/2 * site.ploidy
 		ac = np.sum(np.ma.masked_values(this_geno, 3))
 		an = np.sum(this_geno == 3)
 		if ac == 2*an or ac == 0:
@@ -473,7 +474,7 @@ def calc_ibs_dist(vcf, log, ns, **kwargs):
 			geno_imputed = np.append( geno_imputed, give_chunk(), axis = 0 )
 
 		## get genotype calls as number of alt alleles
-		this_geno = site.gt_types/site.ploidy
+		this_geno = site.gt_types/2 * site.ploidy
 		geno[nused,:] = this_geno[:]
 
 		## impute PLAF for missing values
@@ -891,8 +892,9 @@ def count_derived(vcf, log, ns, **kwargs):
 
 		## sniff ploidy
 		if ploidy is None:
-			pieces = resplit(r"[/|]", site.gt_bases[0])
-			ploidy = len(pieces)
+			#pieces = resplit(r"[/|]", site.gt_bases[0])
+			#ploidy = len(pieces)
+			ploidy = site.ploidy
 			log.info("Detected ploidy = {} in this VCF".format(ploidy))
 
 		## biallelic, has non-bogus ancestral allele
@@ -914,7 +916,7 @@ def count_derived(vcf, log, ns, **kwargs):
 			nused += 1
 
 	if args.calls:
-		counts = counts/ploidy
+		counts = counts/2 * ploidy
 	for jj,iid in enumerate(vcf.samples):
 		print(iid, counts[jj], nsites[jj], counts[jj]/nsites[jj], ploidy, sep = "\t")
 
@@ -1091,95 +1093,117 @@ def calc_sfs(vcf, log, ns, **kwargs):
 	for ii,pop in enumerate(pops.keys()):
 		log.info("\t{}  {: >4d}".format(pop, ssz[ii]))
 
-	## initialize SFS
-	sfs = np.zeros(dims, dtype = np.int)
 	log.info("SFS will have these dimensions: {}".format(dims))
 
+	def ivl_to_region(ivl):
+		return "{}:{}-{}".format(ivl.chrom, ivl.start+1, ivl.end)
+
 	## loop on VCF
+	if args.windows is None:
+		regions = [None]
+		log.info("Processing VCF file in one slurp ...")
+	else:
+		regions = map(ivl_to_region, pbt.BedTool(args.windows))
+		log.info("Processing VCF file in chunks defined in <{}> ...".format(args.windows.name))
+	all_sfs = []
+
 	nused = 0
 	nnodp = 0
 	nmulti = 0
 	nnoanc = 0
 	ii = 0
 	ploidy = None
-	log.info("Processing VCF file ...")
-	for site in vcf:
 
-		## sniff ploidy
-		if ploidy is None:
-			pieces = resplit(r"[/|]", site.gt_bases[0])
-			ploidy = len(pieces)
-			log.info("Detected ploidy = {} in this VCF".format(ploidy))
+	for region in regions:
 
-		ii += 1
+		## initialize SFS
+		sfs = np.zeros(dims, dtype = np.int)
 
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
+		for site in vcf(region = region):
 
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
+			## sniff ploidy
+			if ploidy is None:
+				#pieces = resplit(r"[/|]", site.gt_bases[0])
+				#ploidy = len(pieces)
+				ploidy = site.ploidy
+				log.info("Detected ploidy = {} in this VCF".format(ploidy))
 
-		## not biallelic?
-		if len(site.ALT) > 1:
-			nmulti += 1
-			continue
+			ii += 1
 
-		## no ancestral allele?
-		anc = "X"
-		try:
-			anc = site.INFO["AA"]
-			#log.info("Ancestral allele is '{}'".format(anc))
-		except KeyError as e:
-			nnoanc += 1
-			continue
+			if (ii-1) and not (ii-1) % 1000:
+				log.info("\t... processed {} sites ...".format(ii-1))
 
-		if anc == "X":
-			if args.ref_is_ancestral:
-				anc = site.REF
-			else:
-				nnoanc += 1
+			if ii > ns and ns > -1:
+				ii -= 1
+				break
+
+			## not biallelic?
+			if len(site.ALT) > 1:
+				nmulti += 1
 				continue
 
-		if args.reads:
-			if not "WSAF" in site.FORMAT:
-				nnodp += 1
-				continue
+			## no ancestral allele?
+			anc = "X"
+			try:
+				anc = site.INFO["AA"]
+				#log.info("Ancestral allele is '{}'".format(anc))
+			except KeyError as e:
+				pass
+
+			if anc == "X":
+				if args.ref_is_ancestral:
+					anc = site.REF
+				else:
+					nnoanc += 1
+					continue
+
+			if args.reads:
+				if not "WSAF" in site.FORMAT:
+					nnodp += 1
+					continue
+				else:
+					nused += 1
+				counts = site.format("WSAF")[:,0]
+				sampled = np.zeros(len(ssz), dtype = np.int)
+				for jj,pop in enumerate(pop_order):
+					these_counts = counts[ pops[pop] ]
+					if np.all(these_counts == -1):
+						continue
+					good_counts = these_counts[ these_counts > -1 ]
+					maf = np.average(good_counts)
+					these_counts[ these_counts == -1 ] = maf
+					if not anc == site.REF:
+						these_counts = 1 - these_counts
+					sampled[jj] = np.sum(np.random.binomial(1, these_counts))
+				sampled = tuple(sampled)
 			else:
 				nused += 1
-			counts = site.format("WSAF")[:,0]
-			sampled = np.zeros(len(ssz), dtype = np.int)
-			for jj,pop in enumerate(pop_order):
-				these_counts = counts[ pops[pop] ]
-				if np.all(these_counts == -1):
-					continue
-				good_counts = these_counts[ these_counts > -1 ]
-				maf = np.average(good_counts)
-				these_counts[ these_counts == -1 ] = maf
-				if not anc == site.REF:
-					these_counts = 1 - these_counts
-				sampled[jj] = np.sum(np.random.binomial(1, these_counts))
-			sampled = tuple(sampled)
-		else:
-			nused += 1
-			counts = site.gt_types[:]
-			sampled = np.zeros(len(ssz), dtype = np.int)
-			for jj,pop in enumerate(pop_order):
-				these_counts = counts[ pops[pop] ]
-				omit = (these_counts == 3)
-				if np.all(omit):
-					continue
-				these_counts = these_counts/ploidy
-				good_counts = these_counts[ ~omit ]
-				maf = np.average(good_counts)
-				these_counts[ omit ] = maf
-				if not anc == site.REF:
-					these_counts = 1 - these_counts
-				sampled[jj] = np.sum(np.random.binomial(1, these_counts))
-			sampled = tuple(sampled)
+				counts = site.gt_types[:]
+				sampled = np.zeros(len(ssz), dtype = np.int)
+				for jj,pop in enumerate(pop_order):
+					these_counts = counts[ pops[pop] ]
+					omit = (these_counts == 3)
+					if np.all(omit):
+						continue
+					these_counts = these_counts/2*ploidy
+					good_counts = these_counts[ ~omit ]
+					maf = np.average(good_counts)
+					these_counts[ omit ] = maf
+					if not anc == site.REF:
+						these_counts = 1 - these_counts
+					sampled[jj] = np.sum(np.random.binomial(1, these_counts))
+				sampled = tuple(sampled)
 
-		## finally, update the sfs
-		sfs[ sampled ] += 1
+			## finally, update the sfs
+			sfs[ sampled ] += 1
+
+		## done with inner loop; record this sfs
+		if region is None:
+			log.info("Finished region [whole VCF]; cumulative total {} sites [{} used].".format(ii, nused))
+		else:
+			log.info("Finished region '{}'; cumulative total {} sites [{} used].".format(region, ii, nused))
+
+		all_sfs.append( sfs )
 
 	log.info("Done.")
 	log.info("\t{: >12d} had usable data".format(nused))
@@ -1193,7 +1217,8 @@ def calc_sfs(vcf, log, ns, **kwargs):
 	print("#pops={}".format(",".join(pop_order)))
 	print("#dims={}".format(",".join([ str(_) for _ in dims ])))
 	print("#nsites={}".format(nused))
-	print(*sfs.flatten(), sep = " ")
+	for this_sfs in all_sfs:
+		print(*this_sfs.flatten(), sep = " ")
 
 def thin_sites(vcf, log, ns, **kwargs):
 
@@ -1335,7 +1360,7 @@ def root_help_message(name = None):
 	      filtersummary     tallies of filter status by site or by sample
 
 	  --- Downsampling
-	      thin              emit every nth site, possibly with random starting point
+	      thin              just emit every nth site
 	      prune             greedy LD-pruning in sliding windows
 
 	  --- Ancestral alleles
@@ -1347,7 +1372,7 @@ def root_help_message(name = None):
 	      wsaf              calculate within-sample allele frequency (WSAF) and related quantities from read counts
 	      fws               estimate pseudo-inbreeding coefficient F_ws ("within-sample relatedness")
 	      private           annotate sites where non-ref allele is only found in certain subset of samples
-	      sfs               approximate the n-dimensional unfolded SFS by sampling
+	      sfs               approximate the n-dimensional unfolded SFS by sampling, possibly in windows
 
 	  --- Relatedness/ordination
 	      dist              calculate LD-weighted pairwise distances from within-sample allele frequencies
@@ -1527,6 +1552,8 @@ sfs_parser = subparsers.add_parser("sfs",
 	parents = [parser])
 sfs_parser.add_argument("-p","--pops", type = argparse.FileType("rU"),
 					help = "file of (sample ID, population) tuples [default: all samples as one population]")
+sfs_parser.add_argument("-w","--windows", type = argparse.FileType("rU"),
+					help = "estimate SFS in windows from this *.bed file [default: use whole file]")
 sfs_parser.add_argument("--reads", action = "store_true",
 					default = False,
 					help = "count supporting reads (NB: site-wise, not haplotype-aware) [default: %(default)s]")
@@ -1549,7 +1576,7 @@ thin_parser.set_defaults(func = thin_sites, command = "thin")
 
 ## keep only every nth site
 prune_parser = subparsers.add_parser("prune",
-	description = "Reduce number of sites in VCF by emitting every nth site",
+	description = "Use greedy window-based method to prune sites in LD",
 	parents = [parser])
 prune_parser.add_argument("-w", "--window", type = int,
 						default = 100,

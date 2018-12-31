@@ -29,7 +29,7 @@ usage:
 		  filtersummary     tallies of filter status by site or by sample
 
 	  --- Downsampling
-		  thin              emit every nth site, possibly with random starting point
+		  thin              just emit every nth site
 		  prune             greedy LD-pruning in sliding windows
 
 	  --- Ancestral alleles
@@ -41,7 +41,7 @@ usage:
 		  wsaf              calculate within-sample allele frequency (WSAF) and related quantities from read counts
 		  fws               estimate pseudo-inbreeding coefficient F_ws ("within-sample relatedness")
 		  private           annotate sites where non-ref allele is only found in certain subset of samples
-		  sfs               approximate the n-dimensional unfolded SFS by sampling
+		  sfs               approximate the n-dimensional unfolded SFS by sampling, possibly in windows
 
 	  --- Relatedness/ordination
 		  dist              calculate LD-weighted pairwise distances from within-sample allele frequencies
