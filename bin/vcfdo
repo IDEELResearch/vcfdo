@@ -614,7 +614,6 @@ def transition_or_transversion(vcf, **kwargs):
 	#nbadprefix = 0
 	nbadallele = 0
 	nmulti = 0
-	vcf.add_standard_counter("multiallelic")
 	vcf.log.info("Processing VCF file ...")
 	for site in vcf:
 
@@ -622,7 +621,8 @@ def transition_or_transversion(vcf, **kwargs):
 			nnotsnv += 1
 			continue
 
-		if site.is_multiallelic:
+		if len(site.ALT) > 1:
+			nmulti += 1
 			continue
 
 		if not good_alleles([site.REF] + site.ALT):
@@ -653,10 +653,11 @@ def transition_or_transversion(vcf, **kwargs):
 		site.write_out()
 
 	vcf.add_counter("nnotsnv","sites not SNVs", nnotsnv)
+	vcf.add_counter("nnotsnv","sites with >2 alleles", nmulti)
 	vcf.add_counter("nbad","sites with bad allele(s)", nbadallele)
 	vcf.add_counter("nti","transitions", nti)
 	vcf.add_counter("ntv","transversions", ntv)
-	vcf.add_counter("nbgc","gBGC candidates", nbgc)
+	vcf.add_counter("nbgc","gBGC candidates", ngbc)
 	vcf.show_count_summary()
 	vcf.log.info("\t[ TiTv = {:0.3f} ]".format(nti/ntv))
 
@@ -671,26 +672,33 @@ def count_derived(vcf, **kwargs):
 	vcf.log.info("Counting derived alleles at level of {}".format(how_count))
 
 	## initialize counters
-	what_type = np.float if args.calls else np.float
+	what_type = np.int if args.calls else np.float
 	counts = np.zeros(len(vcf.samples), dtype = what_type)
 	nsites = np.zeros(len(vcf.samples), dtype = np.int)
 
 	## loop on VCF
 	vcf.add_counter("nused","sites had usable data")
-	vcf.add_standard_counter("noancestral")
-	vcf.add_standard_counter("multiallelic")
+	vcf.add_counter("nambig","sites had absent ancestral allele")
+	vcf.add_counter("nmulti","sites had >2 alleles")
 	if args.reads:
-		vcf.add_standard_counter("nowsaf")
+		vcf.add_counter("nuncountable","sites had no WSAF annotations")
 	vcf.log.info("Processing VCF file ...")
 	for site in vcf:
 
+		## absent or bogus ancestral allele?
+		if not site.has_ancestral:
+			vcf.counters["nambig"].increment()
+		anc = site.ancestral
+
 		## not biallelic?
-		if site.is_multiallelic:
+		if len(site.ALT) > 1:
+			vcf.counters["nmult"].increment()
 			continue
 
 		## biallelic, has non-bogus ancestral allele
 		if args.reads:
-			if not site.has_wsaf:
+			if not site.has_format("WSAF"):
+				vcf.counters["nuncountable"].increment()
 				continue
 			else:
 				gt = site.get_wsaf()
@@ -708,7 +716,7 @@ def count_derived(vcf, **kwargs):
 	if args.calls:
 		counts = counts/vcf.ploidy
 	for jj,iid in enumerate(vcf.samples):
-		print(iid, counts[jj], nsites[jj], counts[jj]/nsites[jj], vcf.ploidy, sep = "\t")
+		print(iid, counts[jj], nsites[jj], counts[jj]/nsites[jj], ploidy, sep = "\t")
 
 	vcf.show_count_summary()
 
@@ -803,6 +811,10 @@ def calc_sfs(vcf, **kwargs):
 	ssz = [ len(pops[_]) for _ in pop_order ]
 	dims = tuple([ _ + 1 for _ in ssz ])
 
+	vcf.log.info("Populations and their sizes:")
+	for ii,pop in enumerate(pop_order):
+		vcf.log.info("\t{}  {: >4d}".format(pop, ssz[ii]))
+
 	vcf.log.info("SFS will have these dimensions: {}".format(dims))
 
 	def ivl_to_region(ivl):
@@ -843,8 +855,20 @@ def calc_sfs(vcf, **kwargs):
 			if site.is_multiallelic or (not site.has_ancestral and not args.ref_is_ancestral):
 				continue
 
+
+			## not biallelic?
+			if len(site.ALT) > 1:
+				vcf.counters["nmulti"].increment()
+				continue
+
+			## no ancestral allele?
+			if not site.has_ancestral and not args.ref_is_ancestral:
+				vcf.counters["nnoanc"].increment()
+				continue
+
 			if args.reads:
-				if not site.has_wsaf:
+				if not site.has_format("WSAF"):
+					vcf.counters["nnodp"].increment()
 					continue
 				else:
 					vcf.counters["nused"].increment()

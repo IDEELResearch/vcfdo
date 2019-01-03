@@ -4,9 +4,11 @@
 To use `vcfdo` requires a working **Python 3** installation as well as the following packages:
 
 * [`numpy`](http://www.numpy.org/)
+* [`scipy`](https://www.scipy.org/)
 * [`cyvcf2`](https://github.com/brentp/cyvcf2)
 * [`pyfaidx`](https://pypi.org/project/pyfaidx/)
 * [`scikit-allel`](https://github.com/cggh/scikit-allel)
+* [`pybedtools`](https://daler.github.io/pybedtools/)
 
 Assuming the user either can write to the global `site-packages` directory (ie. has root access or a `conda`-type environment), `vcfdo` can be installed straight from Github with `pip`:
 ```
@@ -24,29 +26,33 @@ usage:
 	Commands:
 
 	  --- Basic statistics
-		  missing           rates of missing calls by site or by sample
-		  depthsummary      quantiles of read depth (at called sites) per sample
-		  filtersummary     tallies of filter status by site or by sample
+	      missing           rates of missing calls by site or by sample
+	      depthsummary      quantiles of read depth (at called sites) per sample
+	      filtersummary     tallies of filter status by site or by sample
 
 	  --- Downsampling
-		  thin              just emit every nth site
-		  prune             greedy LD-pruning in sliding windows
+	      thin              just emit every nth site
+	      prune             greedy LD-pruning in sliding windows
 
 	  --- Ancestral alleles
-		  polarize          define ancestral alleles based on outgroup sequence
-		  titv              annotate sites as transitions or transversions; flag gBGC candidates
-		  derived           count derived alleles per sample, using either read counts or hard calls
+	      polarize          define ancestral alleles based on outgroup sequence
+	      titv              annotate sites as transitions or transversions; flag gBGC candidates
+	      derived           count derived alleles per sample, using either read counts or hard calls
 
 	  --- Allele frequencies
-		  wsaf              calculate within-sample allele frequency (WSAF) and related quantities from read counts
-		  fws               estimate pseudo-inbreeding coefficient F_ws ("within-sample relatedness")
-		  private           annotate sites where non-ref allele is only found in certain subset of samples
-		  sfs               approximate the n-dimensional unfolded SFS by sampling, possibly in windows
+	      wsaf              calculate within-sample allele frequency (WSAF) and related quantities from read counts
+	      fws               estimate pseudo-inbreeding coefficient F_ws ("within-sample relatedness")
+	      private           annotate sites where non-ref allele is only found in certain subset of samples
+	      sfs               approximate the n-dimensional unfolded SFS by sampling, possibly in windows
 
 	  --- Relatedness/ordination
-		  dist              calculate LD-weighted pairwise distances from within-sample allele frequencies
-		  ibs               calculate simple identity-by-state (IBS) matrix from hard calls at polymorphic sites only
-		  pca               perform PCA using within-sample allele frequencies instead of hard calls
+	      dist              calculate LD-weighted pairwise distances from within-sample allele frequencies
+	      ibs               calculate simple identity-by-state (IBS) matrix from hard calls at polymorphic sites only
+	      pca               perform PCA using within-sample allele frequencies instead of hard calls
+
+	  --- Admixture
+	      f3stat           calculate Patterson's normalized f_3 statistic
+	      f4stat           calculate Patterson's normalized f_4 statistic, also known as the D-statistic
 
 ```
 
@@ -58,13 +64,16 @@ Some options are common to all commands; these are
 -n NSITES, --nsites NSITES
 					  stop after processing this many sites [default: no
 					  limit]
+--ref-is-ancestral    assume reference allele is the ancestral one, ignoring
+					  INFO/AA (USE WITH CAUTION)
 --chunk-size CHUNK_SIZE
 					  when loading genotypes into memory, process this many
 					  sites per chunk [default: 2000]
---seed SEED           random number seed; only affects stuff involving
-					  sampling [default: 1]
--q, --quiet           suppress logging messages
--v, --verbose		  see more logging messages
+--seed SEED           random number seed for reproducibility, values < 0 use
+					  auto seed; only affects stuff involving sampling
+					  [default: 1]
+-q, --quiet           see fewer logging messages
+-v, --verbose         see more logging messages
 ```
 
 All of the utilities in `vcfdo` work on streams, and are intended to be used that way. The goal is to store on disk only those attributes of a VCF that are invariant under subsetting by rows (sites) or columns (samples). Everything else can be calculated on the fly as needed. Simple filtering operations such as those available in `bcftools view` are not duplicated in `vcfdo` -- wherever possible, it will be more efficient to do what you can with `bcftools view` and stream the result to `vcfdo`.
@@ -84,11 +93,11 @@ This produces a PCA result in a pair of files `my_pca.pca` (sample projections) 
 ## General remarks
 
 * All utilities can be limited to the first handful of sites in the file by passing `-n {number of sites to visit}`. It is recommended to test-drive commands on a small number of sites before unleashing them in a multi-gigabyte file.
-* All utilities emit rather verbose log messages, including regular progress updates while streaming through the input VCF file. To suppress this, pass `--quiet`.
+* All utilities emit rather verbose log messages, including regular progress updates while streaming through the input VCF file. To suppress this, pass `--quiet`. To see lower-level debugging messages, pass `--verbose`.
 * All utilities that produce VCF output leave a "breadcrumb" in the VCF header documenting the command-line call, current working directory and timestamp.
 * All utilities that produce VCF output will dump uncompressed VCF, starting with a valid header, to `stdout`.
 * Default input for all utilities is `stdin`. An unfortunate side-effect that I haven't been able to fix is that calling `vcfdo <command>` with no arguments and no piped input will cause the command-line to hang until the user interrupts it with `Ctrl-D` (not `Ctrl-C`; why??)
-* When a list of samples is required at the command line, `vcfdo` will check it against the VCF header and remove duplicates. Samples requsted but not present in the VCF are ignored with a warning.
+* When a list of samples (or sample-to-population assignments) is required at the command line, `vcfdo` will check sample names against the VCF header and remove duplicates. Samples requested but not present in the VCF are ignored with a warning.
 
 ## Definitions and conventions
 As the target audience for this tool is people working on _Plasmodium_ spp, heavy use is made of some quantities that are bespoke to malariologists. These include:
@@ -105,10 +114,12 @@ As the target audience for this tool is people working on _Plasmodium_ spp, heav
 
 These were introduced (I think) in [Manske _et al_ (2012) _Nature Genetics_ **487**: 375-379 (PMC3738909)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3738909/).
 
-To avoid spawning not-a-number warnings, `vcfdo` encodes missing values for these quantities as -1.
+To avoid spawning not-a-number warnings in downstream tools, `vcfdo` encodes missing values for these quantities as -1.
+
+The normalized **_f_<sub>3</sub>** and **_f_<sub>4</sub>** (aka **_D_**) statistics calculated by `vcfdo f3stat` and `vcfdo f4stat`, respectively, use the equations in [Patterson _et al_ (2012) _Genetics_ **192**: 1065-1093 (PMC3522152)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3522152/). Missing or invalid values for the site-wise allele frequencies that enter the estimators are silently ignored with the hope that the number of sites analyzed is sufficient that the rate of missingness will be negligible. I have not confirmed that my code gives equivalent results to `ADMIXTOOLS`.
 
 ## Order of operations
-The design of `vcfdo` is modular: multiple tools may need to be strung together to accomplish a given task. In most cases this comes down to creating and then using site- or genotype-level annotations in the VCF. The table below summarises the annotations required and/or produced by each tool in `vcfdo`. Annotations in the **recalculates** column are re-computed on the fly _before_ doing any work.
+The design of `vcfdo` is modular: multiple tools may need to be strung together to accomplish a given task. In most cases this comes down to creating and then using site- or genotype-level annotations in the VCF. The table below summarises the annotations required and/or produced by each tool in `vcfdo`. Annotations in the **recalculates** column are re-computed on the fly _before_ doing any work, but are not updated in the source VCF.
 
 | tool | requires | adds | recalculates
 --- | --- | --- | ---
