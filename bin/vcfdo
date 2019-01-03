@@ -14,7 +14,7 @@ import logging
 np.warnings.filterwarnings("ignore")
 
 import pybedtools as pbt
-from itertools import permutations
+from itertools import permutations, combinations
 from re import split as resplit
 from datetime import datetime as dt
 from collections import defaultdict, OrderedDict
@@ -29,10 +29,10 @@ from vcfdo import core
 def block_jackknife(values, statistic, block_size = 1):
 
 	## how long is input? allow to be multidimensional, assume replicates are in rows
+	#print("values have shape {}".format(values.shape))
 	if values.ndim < 2:
 		values = np.atleast_2d(values).T
 	n = values.shape[0]
-	#print("values have shape {}".format(values.shape))
 
 	## how many blocks, respecting (approx) the block size?
 	m = block_size
@@ -371,7 +371,6 @@ def calc_ibs_dist(vcf, **kwargs):
 			geno_imputed = vcf.add_chunk(geno_imputed, args.chunk_size)
 
 		## get genotype calls as number of alt alleles
-		this_geno = site.to_n_alt()
 		geno[nused,:] = this_geno[:]
 
 		## impute PLAF for missing values
@@ -388,28 +387,36 @@ def calc_ibs_dist(vcf, **kwargs):
 	vcf.log.info("Dimensions of full genotype matrix: {}".format(geno_imputed.shape))
 
 	vcf.log.info("Calculating pairwise distances ...")
-	D = squareform( pairwise_distance(geno_imputed, "hamming") )
-	D = 1 - D
-	formatter = "{:0." + str(args.digits) + "f}"
+	#D = squareform( pairwise_distance(geno_imputed, "hamming") )
+	#D = 1 - D
+	D = np.eye(vcf.nsamples)
+	nz = np.zeros( (vcf.nsamples,vcf.nsamples), dtype = np.int)
+	combos = list( it.combinations(range(0, len(vcf.samples)), 2) )
+	vcf.log.info("\t[{} combinations]".format(len(combos)))
+	ii = 0
+	for sa,sb in combos:
+		ii += 1
+		fa = np.ma.masked_values(geno[:,sa], 3)
+		fb = np.ma.masked_values(geno[:,sb], 3)
+		d = 1 - np.average(np.abs(fa-fb))
+		if d is np.ma.masked:
+			d = np.nan
+		D[sa,sb] = d
+		D[sb,sa] = d
+		nz[sa,sb] = np.sum(np.logical_and(~fa.mask, ~fb.mask))
+		nz[sb,sa] = nz[sa,sb]
+		if not ii % 100:
+			vcf.log.info("\t... {} pairs done ...".format(ii))
 
+	formatter = "{:0." + str(args.digits) + "f}"
 	if not args.flatten:
 		print(".", *vcf.samples, sep = "\t")
 		for jj,iid in enumerate(vcf.samples):
 			rounded = [ formatter.format(_) for _ in D[jj,:] ]
 			print(vcf.samples[jj], *rounded, sep = "\t")
 	else:
-		combos = list( it.combinations(range(0, len(vcf.samples)), 2) )
-		vcf.log.info("\t[{} combinations]".format(len(combos)))
-		ii = 0
 		for sa,sb in combos:
-			ii += 1
-			fa = np.ma.masked_values(geno[:,sa], 3)
-			fb = np.ma.masked_values(geno[:,sb], 3)
-			nz = np.sum(np.logical_and(geno[:,sa] != 3, geno[:,sb] != 3))
-			d = D[sa,sb]
-			if not ii % 100:
-				log.info("\t... {} pairs done ...".format(ii))
-			print(vcf.samples[sa], vcf.samples[sb], nz, formatter.format(d), sep = "\t")
+			print(vcf.samples[sa], vcf.samples[sb], nz[sa,sb], formatter.format(D[sa,sb]), sep = "\t")
 
 	vcf.log.info("Done.\n")
 
@@ -1026,15 +1033,22 @@ def prune_sites_by_ld(vcf, **kwargs):
 	vcf.show_count_summary()
 
 
-def get_threepop_combos(x):
+def get_threepop_combos(x, outgroup = None):
 
-	seen = []
-	for a,b,c in permutations(x, 3):
-		if (a,c,b) in seen:
-			continue
-		else:
-			seen.append( (a,b,c) )
-	return seen
+	if outgroup is None:
+		seen = []
+		for a,b,c in permutations(x, 3):
+			if (a,c,b) in seen:
+				continue
+			else:
+				seen.append( (a,b,c) )
+		return seen
+	else:
+		ingroups = list(set(x)-set([outgroup]))
+		combos = []
+		for a,b in combinations(ingroups, 2):
+			combos.append( (outgroup, a, b) )
+		return combos
 
 def get_fourpop_combos(x):
 
@@ -1073,11 +1087,17 @@ def calc_f3(vcf, **kwargs):
 
 	## get tuples representing 3-population combinations where order of last 2 doesn't matter
 	##    since f(C;A,B) == f(C;B,A)
-	combos = get_threepop_combos(pop_order)
-	vcf.log.info("There will be this many f_3 statistics to compute: {}.".format(len(combos)))
+	if args.outgroup and args.outgroup in pop_order:
+		og = args.outgroup
+		vcf.log.info("Holding population '{}' as outgroup.".format(og))
+	else:
+		og = None
+	combos = get_threepop_combos(pop_order, og)
+	ncombos = len(combos)
+	vcf.log.info("There will be this many f_3 statistics to compute: {}.".format(ncombos))
 
-	T = vcf.add_chunk(None, args.chunk_size)
-	B = vcf.add_chunk(None, args.chunk_size)
+	T = vcf.add_chunk(None, args.chunk_size, nsamples = ncombos)
+	B = vcf.add_chunk(None, args.chunk_size, nsamples = ncombos)
 
 	## loop on sites
 	nkept = 0
@@ -1089,8 +1109,8 @@ def calc_f3(vcf, **kwargs):
 		# increase array allocation, if needed
 		if vcf.ii >= T.shape[0]:
 			vcf.log.debug("Increasing array allocation {} --> {} ... ".format(T.shape[0], T.shape[0]+args.chunk_size))
-			T = vcf.add_chunk(T, args.chunk_size)
-			B = vcf.add_chunk(B, args.chunk_size)
+			T = vcf.add_chunk(T, args.chunk_size, nsamples = ncombos)
+			B = vcf.add_chunk(B, args.chunk_size, nsamples = ncombos)
 
 		if len(site.ALT) > 1:
 			vcf.counters["nmulti"].increment()
@@ -1165,10 +1185,11 @@ def calc_f4(vcf, **kwargs):
 	## get tuples representing 4-population combinations where order of last 2 doesn't matter
 	##    since f(W,X;A,B) == f(X,W;B,A) etc
 	combos = get_fourpop_combos(pop_order)
-	vcf.log.info("There will be this many f_4 statistics to compute: {}.".format(len(combos)))
+	ncombos = len(combos)
+	vcf.log.info("There will be this many f_4 statistics to compute: {}.".format(ncombos))
 
-	T = vcf.add_chunk(None, args.chunk_size)
-	B = vcf.add_chunk(None, args.chunk_size)
+	T = vcf.add_chunk(None, args.chunk_size, nsamples = ncombos)
+	B = vcf.add_chunk(None, args.chunk_size, nsamples = ncombos)
 
 	## loop on sites
 	nkept = 0
@@ -1180,8 +1201,8 @@ def calc_f4(vcf, **kwargs):
 		# increase array allocation, if needed
 		if vcf.ii >= T.shape[0]:
 			vcf.log.debug("Increasing array allocation {} --> {} ... ".format(T.shape[0], T.shape[0]+args.chunk_size))
-			T = vcf.add_chunk(T, args.chunk_size)
-			B = vcf.add_chunk(B, args.chunk_size)
+			T = vcf.add_chunk(T, args.chunk_size, nsamples = ncombos)
+			B = vcf.add_chunk(B, args.chunk_size, nsamples = ncombos)
 
 		if len(site.ALT) > 1:
 			vcf.counters["nmulti"].increment()
@@ -1463,7 +1484,10 @@ f3_parser = subparsers.add_parser("f3stat",
 	description = "Estimate Patterson's f_3 statistic for gene flow f(C;A,B) (from PMC3522152)",
 	parents = [parser])
 f3_parser.add_argument("-p","--pops", type = argparse.FileType("rU"),
-					help = "file of (sample ID, population) tuples [default: all samples as one population]")
+					required = True,
+					help = "file of (sample ID, population) tuples")
+f3_parser.add_argument("-o","--outgroup",
+					help = "compute so-called 'outroup f_3' holding this population as outgroup [default: all possible f_3s]")
 f3_parser.add_argument("--reads", action = "store_true",
 					default = False,
 					help = "count supporting reads (NB: site-wise, not haplotype-aware) [default: %(default)s]")
