@@ -14,6 +14,7 @@ import logging
 np.warnings.filterwarnings("ignore")
 
 import pybedtools as pbt
+from itertools import permutations
 from re import split as resplit
 from datetime import datetime as dt
 from collections import defaultdict, OrderedDict
@@ -23,9 +24,13 @@ from allel import pca, randomized_pca, pairwise_distance, locate_unlinked
 from scipy.spatial.distance import squareform
 from pyfaidx import Fasta
 
+from vcfdo import core
+
 def block_jackknife(values, statistic, block_size = 1):
 
 	## how long is input? allow to be multidimensional, assume replicates are in rows
+	if values.ndim < 2:
+		values = np.atleast_2d(values).T
 	n = values.shape[0]
 	#print("values have shape {}".format(values.shape))
 
@@ -40,31 +45,38 @@ def block_jackknife(values, statistic, block_size = 1):
 
 	## not enough blocks to get standard errors? too bad
 	if M < 3:
-		return np.nan, np.tile(np.nan, M)
+		se = np.nan
+	else:
 
-	## loop on blocks
-	theta = np.zeros(M)
-	for jj, delete_j in enumerate(blocks):
-		## use mask out this block
-		idx = np.tile(True, n)
-		#print("To delete = {}".format(delete_j))
-		idx[delete_j] = False
-		keep = values[ idx,... ]
-		#print("Keepers have shape {}".format(keep.shape))
-		## calculate statistic on remaining values
-		theta[jj] = statistic(keep)
-		#print("theta_j = {}".format(theta[jj]))
+		## loop on blocks
+		for jj, delete_j in enumerate(blocks):
+			## use mask out this block
+			idx = np.tile(True, n)
+			#print("To delete = {}".format(delete_j))
+			idx[delete_j] = False
+			keep = values[ idx,... ]
+			#print("Keepers have shape {}".format(keep.shape))
+			## calculate statistic on remaining values
+			theta_j = statistic(keep)
+			if jj == 0:
+				theta = np.zeros((M, theta_j.shape[0]))
+				#print("thetas have shape {}".format(theta.shape))
+			#print("theta_j = {}".format(theta_j))
+			theta[jj] = theta_j
 
-	## calculate standard error
-	theta_bar = np.mean(theta)
-	#print("theta_bar = {}".format(theta_bar))
-	se = np.sqrt( ((M-1)/M) * np.sum(np.power(theta - theta_bar, 2)) )
-	#print("se = {}".format(se))
+		## calculate standard error
+		theta_bar = np.mean(theta, 0)
+		#print("theta_bar = {}".format(theta_bar))
+		se = np.sqrt( ((M-1)/M) * np.sum(np.power(theta - theta_bar, 2), 0) )
 
-	## return se and blockwise stats
-	return se, theta
+	#print("se = {}".format(se[...]))
 
-def calc_wsaf(vcf, log, ns, **kwargs):
+	## return se
+	return se, None
+
+def calc_wsaf(vcf, **kwargs):
+
+	args = argparse.Namespace(**kwargs)
 
 	vcf.add_info_to_header({ "ID": "PLAF", "Description": "Population-level ALT allele frequency weighted for mixed samples", "Number": 1, "Type": "Float" })
 	vcf.add_info_to_header({ "ID": "PLMAF", "Description": "Population-level minor allele frequency weighted for mixed samples", "Number": 1, "Type": "Float" })
@@ -72,37 +84,19 @@ def calc_wsaf(vcf, log, ns, **kwargs):
 	vcf.add_format_to_header({ "ID": "WSAF", "Description": "Within-sample allele frequency weighted for mixed samples", "Number": 1, "Type": "Float" })
 	vcf.add_format_to_header({ "ID": "WSMAF", "Description": "Within-sample MAJOR allele frequency weighted for mixed samples", "Number": 1, "Type": "Float" })
 
-	do_filter = kwargs["set_filter"] is not None
+	do_filter = args.set_filter is not None
 	if do_filter:
-		filter_at = min(1 - kwargs["set_filter"], kwargs["set_filter"])
+		filter_at = min(1 - args.set_filter, args.set_filter)
 		vcf.add_filter_to_header({ "ID": "PseudoHet", "Description": "WSAF out-of-bounds for a pure isolate" })
 		vcf.add_format_to_header({ "ID": "FT", "Description": "Genotype-level filter", "Number": ".", "Type": "String" })
 
-	log.info("Annotating VCF file: <{}>".format(kwargs["infile"]))
-	sys.stdout.write(vcf.raw_header)
+	vcf.write_header()
 
 	## loop on VCF and add 'WSAF','PLAF','PLMAF' tags
-	ii = 0
-	nmulti = 0
-	nnonpoly = 0
-	log.info("Processing VCF file ...")
+	vcf.add_standard_counter("multiallelic")
+	vcf.add_standard_counter("nonpolymorphic")
+	vcf.log.info("Processing VCF file ...")
 	for site in vcf:
-
-		ii += 1
-
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
-
-		## don't bother with multiallelic sites
-		if len(site.ALT) > 1:
-			nmulti += 1
-
-		## don't bother with nonpolymorphic sites
-		if len(site.ALT) < 1:
-			nnonpoly += 1
 
 		dp = site.format("AD")
 		dp[ dp < 0 ] = 0
@@ -152,68 +146,37 @@ def calc_wsaf(vcf, log, ns, **kwargs):
 		if do_filter:
 			gt_filt = np.tile("PASS", len(vcf.samples))
 			gt_filt[ np.logical_or(wsaf > args.set_filter, wsaf < (1-args.set_filter)) ] = "PseudoHet"
-			if "GT" in site.FORMAT:
-				old_filt = site.format("FT")
+			if site.has_format("FT"):
+				old_filt = site.get_format("FT")
 				for ii, flt in enumerate(old_filt):
 					if flt != "PASS":
 						gt_filt[ii] = flt + ";" + gt_filt[ii]
 			site.set_format("FT", gt_filt)
 
-		try:
-			sys.stdout.write(str(site))
-			#sys.stdout.flush()
-		except BrokenPipeError as e:
-			log.warning("Stopped because the pipe reading from this program has closed.".format(ii))
-			break
+		site.write_out()
 
-	log.info("Done.".format(ii))
-	log.info("\t{: >12d} biallelic in called genotypes".format(ii-nmulti))
-	log.info("\t{: >12d} non-polymorphic in called genotypes".format(nnonpoly))
-	log.info("\t{: >12d} multiallelic".format(nmulti))
-	log.info("\t------------")
-	log.info("\t{: >12d} total sites".format(ii))
+	vcf.show_count_summary()
 
 
-def calc_fws(vcf, log, ns, **kwargs):
+def calc_fws(vcf, **kwargs):
 
-	log.info("Processing VCF file: <{}>".format(kwargs["infile"]))
 	args = argparse.Namespace(**kwargs)
 
-	## loop on VCF and add 'WSAF','PLAF','PLMAF' tags
-	ii = 0
-	nmulti = 0
-	nnonpoly = 0
-	nnowsaf = 0
-	log.info("Processing VCF file ...")
+	## loop on VCF and gather WSAF etc
+	vcf.add_counter("nused","sites had usable data")
+	vcf.add_standard_counter("multiallelic")
+	vcf.add_standard_counter("nowsaf")
+	vcf.add_standard_counter("nonpolymorphic")
+	vcf.log.info("Processing VCF file ...")
 	H_s = []
 	H_p = []
 
 	for site in vcf:
 
-		ii += 1
-
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
-
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
-
-		## don't bother with multiallelic sites
-		if len(site.ALT) > 1:
-			nmulti += 1
+		if site.is_multiallelic or (not site.has_wsaf) or (not site.is_polymorphic):
 			continue
 
-		## don't bother with nonpolymorphic sites
-		if len(site.ALT) < 1:
-			nnonpoly += 1
-			continue
-
-		#if (not "WSAF" in site.FORMAT) or (not "PLMAF" in site.INFO):
-		#	nnowsaf += 1
-		#	continue
-
-		wsaf = np.ma.masked_values(site.format("WSAF"), -1)
+		wsaf = site.get_wsaf()
 		plmaf = min(np.average(wsaf), 1 - np.average(wsaf))
 		#plmaf = site.INFO["PLMAF"]
 		H_px = 1 - (plmaf**2 + (1 - plmaf)**2)
@@ -221,22 +184,17 @@ def calc_fws(vcf, log, ns, **kwargs):
 		H_p.append(H_px)
 		H_s.append(H_sx)
 
-	log.info("Done reading VCF.".format(ii))
-	log.info("\t{: >12d} biallelic in called genotypes".format(ii-nmulti))
-	log.info("\t{: >12d} non-polymorphic in called genotypes".format(nnonpoly))
-	log.info("\t{: >12d} multiallelic".format(nmulti))
-	log.info("\t{: >12d} without WSAF,PLMAF annotations".format(nnowsaf))
-	log.info("\t------------")
-	log.info("\t{: >12d} total sites\n".format(ii))
+	vcf.counters["nused"].increment( len(H_p) )
+	vcf.show_count_summary()
 
-	log.info("Calculating F_ws ...")
+	vcf.log.info("Calculating F_ws ...")
 	if args.jackknife is not None:
-		log.info(" [ standard errors estimated by block jackknife in blocks of size ~= {} ]".format(args.jackknife))
+		vcf.log.info(" [ standard errors estimated by block jackknife in blocks of size ~= {} ]".format(args.jackknife))
 	else:
-		log.info(" [ asymptotic standard errors ]")
+		vcf.log.info(" [ asymptotic standard errors ]")
 	## matrices of H_px and H_sx
 	H_p = np.array(H_p, dtype = np.float).reshape(len(H_p), 1)
-	H_s = np.ma.asanyarray(H_s)[:,:,0]
+	H_s = np.ma.asanyarray(H_s)
 	#print(np.sum(H_s.mask))
 	#print(H_s.shape)
 
@@ -250,9 +208,9 @@ def calc_fws(vcf, log, ns, **kwargs):
 			se = np.sqrt(np.diag(C)) # standard error
 		F_ws = 1 - beta
 		if do_se:
-			return F_ws[0,0], se[0]
+			return F_ws[0,:], se
 		else:
-			return F_ws[0,0]
+			return F_ws[0,:]
 
 	## do no-intercept regression of H_sx on H_px
 	for ii,iid in enumerate(vcf.samples):
@@ -265,98 +223,64 @@ def calc_fws(vcf, log, ns, **kwargs):
 			if args.jackknife is not None:
 				se, _ = block_jackknife(Z, do_fws, args.jackknife)
 				F_ws = do_fws(Z)
+				if np.isnan(se):
+					se = np.tile(np.nan,1)
 			else:
 				F_ws, se = do_fws(Z, True)
-			print(iid, F_ws, se, np.sum(~H_sx.mask), sep = "\t")
+			print(iid, np.asscalar(F_ws), np.asscalar(se), np.sum(~H_sx.mask), sep = "\t")
 		else:
 			print(iid, np.nan, np.nan, 0, sep = "\t")
 
-	log.info("Done.\n")
+	vcf.log.info("Done.\n")
 
 
-def pca_wsaf(vcf, log, ns, **kwargs):
+def pca_wsaf(vcf, **kwargs):
 
 	## load args into a namespace, so I don't have to recode so much stuff
 	args = argparse.Namespace(**kwargs)
 
-	## decide which samples to use
-	if args.samples_file:
-		keep_samples = []
-		for line in args.samples_file:
-			if line.startswith("#"):
-				continue
-			else:
-				iid = line.strip().split().pop(0)
-				if not iid in vcf.samples:
-					log.warning("Sample '{}' in populations file but not in VCF; skpping it.".format(iid))
-					continue
-				keep_samples.append(iid)
-		log.info("Read {} samples from file <{}>".format(len(keep_samples), args.samples_file.name))
-	elif args.samples is not None and len(args.samples):
-		keep_samples = args.samples
-		log.info("Read {} samples from command line".format(len(keep_samples)))
-	else:
-		keep_samples = None
-
-	if keep_samples is not None:
-		keep_samples = set(vcf.samples) & set(keep_samples)
-		keep_samples = list(keep_samples)
-		nsamples = len(keep_samples)
-		log.info("Retained {} distinct samples that were verified in VCF header.".format(nsamples))
-	else:
-		keep_samples = list(vcf.samples)
-		nsamples = len(vcf.samples)
-		log.info("Retained all {} samples in VCF.".format(nsamples))
-
-	CHUNK_SIZE = args.chunk_size
-	ii = 0
-	nkept = 0
-	W = np.zeros((CHUNK_SIZE, nsamples), dtype = np.float)
-	log.info("Reading genotype data in chunks of size {} ...".format(CHUNK_SIZE))
-
+	keep_samples = vcf.reconcile_samples(args.samples, args.samples_file, allow_all = True)
 	sample_idx = [ vcf.samples.index(_) for _ in keep_samples ]
+
+	W = vcf.add_chunk(None, args.chunk_size, nsamples = len(sample_idx))
+	vcf.log.info("Reading genotype data in chunks of size {} ...".format(args.chunk_size))
+	vcf.add_standard_counter("multiallelic")
+	vcf.add_counter("nrare","sites with PLMAF < {}".format(args.min_plmaf))
+	nkept = 0
 	for site in vcf:
 
-		ii += 1
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
+		if site.is_multiallelic:
+			continue
 
-		if site.INFO["PLMAF"] < args.min_plmaf:
+		plmaf = site.recalc_plmaf(sample_idx)
+		if plmaf < args.min_plmaf:
+			vcf.counters["nrare"].increment()
 			continue
 
 		nkept += 1
 		if nkept >= W.shape[0]:
-			log.debug("Increasing array allocation ... ")
-			W = np.append( W, np.zeros((CHUNK_SIZE, nsamples), dtype = np.float), axis = 0 )
+			vcf.log.debug("Increasing array allocation ... ")
+			W = vcf.add_chunk(W, args.chunk_size)
 
-		## get WSAFs from FORMAT field
-		w = site.format("WSAF")
-		w = w[sample_idx,0]
-
-		## impute PLAF for missing values
-		plaf = np.average(w[ w != -1 ])
-		ww = w[:]
-		ww[ ww == -1 ] = plaf
-		W[nkept,:] = ww
+		## get WSAFs from FORMAT field, imputing PLAFs for missing
+		w, plaf = site.get_imputed_wsaf(sample_idx)
+		W[ nkept,: ] = w
 
 	## remove low-variance sites that make bad things happen in SVD
 	W = W[:nkept,:]
 	sigma = np.var(W, 1)
 	W = W[ (sigma > 1.0e-6),:]
-	log.info("Loaded genotypes at {} sites with PLMAF >= {}".format(nkept, args.min_plmaf))
-	log.info("Retained {} sites with non-negligible variance for PCA.".format(W.shape[0]))
+	vcf.log.info("Loaded genotypes at {} biallelic sites with PLMAF >= {}".format(nkept, args.min_plmaf))
+	vcf.log.info("Retained {} sites with non-negligible variance for PCA.".format(W.shape[0]))
 
 	## do the PCA using scikit-allel tools
-	log.info("Performing PCA ...")
+	vcf.log.info("Performing PCA ...")
 	pca_fn = pca if not args.randomized else randomized_pca
 	coords, model = pca_fn(W, n_components = args.ncomponents, scaler = "patterson")
-	log.info("Done with PCA.")
+	vcf.log.info("Done with PCA.")
 
 	## write rotations and normalized eigenvalues
-	log.info("Writing results to <{0}.pca> and <{0}.pca.ev> (sample coordinates and variance explained, respectively.)".format(args.out))
+	vcf.log.info("Writing results to <{0}.pca> and <{0}.pca.ev> (sample coordinates and variance explained, respectively.)".format(args.out))
 	with open(args.out + ".pca", "w") as pcs_file:
 		for ii in range(0, coords.shape[0]):
 			print(vcf.samples[ii], *coords[ii,:], sep = "\t", file = pcs_file)
@@ -364,61 +288,47 @@ def pca_wsaf(vcf, log, ns, **kwargs):
 		print("\n".join([ str(_) for _ in model.explained_variance_ratio_ ]), file = evs_file)
 
 	## all done
-	log.info("Done.\n")
+	vcf.log.info("Done.\n")
 
-
-def calc_weighted_dist(vcf, log, ns, **kwargs):
+def calc_weighted_dist(vcf, **kwargs):
 
 	args = argparse.Namespace(**kwargs)
 
-	CHUNK_SIZE = args.chunk_size
-	def give_chunk():
-		return np.zeros((CHUNK_SIZE,len(vcf.samples)), dtype = np.float)
-
-	wsaf = give_chunk()
-	wsaf_imputed = give_chunk()
+	wsaf = vcf.add_chunk(None, args.chunk_size)
+	wsaf_imputed = vcf.add_chunk(None, args.chunk_size)
 
 	## loop on VCF and add take sample depths
-	ii = 0
-	logger.info("Reading genotype data in chunks of size {} ...".format(CHUNK_SIZE))
+	vcf.log.info("Reading genotype data in chunks of size {} ...".format(args.chunk_size))
 	for site in vcf:
 
-		ii += 1
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
-
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
-
-		if ii >= wsaf.shape[0]:
-			log.debug("Increasing array allocation ... ")
-			wsaf = np.append( wsaf, give_chunk(), axis = 0 )
-			wsaf_imputed = np.append( wsaf_imputed, give_chunk(), axis = 0 )
+		if vcf.ii >= wsaf.shape[0]:
+			vcf.log.debug("Increasing array allocation ... ")
+			wsaf = vcf.add_chunk(wsaf, args.chunk_size)
+			wsaf_imputed = vcf.add_chunk(wsaf_imputed, args.chunk_size)
 
 		## get WSAFs from FORMAT field
-		this_wsaf = site.format("WSAF")
-		wsaf[ii,:] = this_wsaf[:,0]
+		this_wsaf = site.get_wsaf()
+		wsaf[ vcf.ii,: ] = this_wsaf
 
 		## impute PLAF for missing values
-		plaf = np.average(this_wsaf[ this_wsaf != -1 ])
-		ww = this_wsaf[:,0]
-		ww[ ww == -1 ] = plaf
-		wsaf_imputed[ii,:] = ww
+		w, plaf = site.get_imputed_wsaf()
+		wsaf_imputed[ vcf.ii,: ] = w
 
-	wsaf = wsaf[ :ii, : ]
-	wsaf_imputed = wsaf_imputed[ :ii, : ]
-	log.info("Dimensions of full genotype matrix: {}".format(wsaf.shape))
-	log.info("Calculating weighting factors following Amato et al (PMC4786412) ...")
+	vcf.show_count_summary()
+
+	wsaf = wsaf[ :vcf.ii, : ]
+	wsaf_imputed = wsaf_imputed[ :vcf.ii, : ]
+	vcf.log.info("Dimensions of full genotype matrix: {}".format(wsaf.shape))
+	vcf.log.info("Calculating weighting factors following Amato et al (PMC4786412) ...")
 	r_sq = np.corrcoef(wsaf_imputed) ** 2
 	r_sq[ np.isnan(r_sq) ] = 0
 	r_sq -= np.eye(r_sq.shape[0])
 	r_sq[ r_sq < kwargs["rsq_cutoff"] ] = 0
 	w_i = 1 / (1 + np.sum(r_sq, 1))
 
-	log.info("Calculating pairwise distances using WSAFs ...")
+	vcf.log.info("Calculating pairwise distances using WSAFs ...")
 	combos = list( it.combinations(range(0, len(vcf.samples)), 2) )
-	log.info("\t[{} combinations]".format(len(combos)))
+	vcf.log.info("\t[{} combinations]".format(len(combos)))
 	formatter = "{:0." + str(args.digits) + "f}"
 	#D = np.zeros( (len(vcf.samples), len(vcf.samples)), dtype = np.float )
 	ii = 0
@@ -431,63 +341,53 @@ def calc_weighted_dist(vcf, log, ns, **kwargs):
 		#D[ sa,sb ] = np.average(d*w_i)
 		nz = np.sum(~d_i.mask)
 		if not ii % 100:
-			log.info("\t... {} pairs done ...".format(ii))
+			vcf.log.info("\t... {} pairs done ...".format(ii))
 		print(vcf.samples[sa], vcf.samples[sb], nz, formatter.format(d), sep = "\t")
 
-	log.info("Done.\n")
+	vcf.log.info("Done.\n")
 
-def calc_ibs_dist(vcf, log, ns, **kwargs):
+def calc_ibs_dist(vcf, **kwargs):
 
 	args = argparse.Namespace(**kwargs)
 
-	CHUNK_SIZE = args.chunk_size
-	def give_chunk():
-		return np.zeros((CHUNK_SIZE,len(vcf.samples)), dtype = np.float)
-
-	geno = give_chunk()
-	geno_imputed = give_chunk()
+	geno = vcf.add_chunk(None, args.chunk_size, np.float)
+	geno_imputed = vcf.add_chunk(None, args.chunk_size, np.float)
 
 	## loop on VCF and add take sample depths
-	ii = 0
 	nused = 0
-	logger.info("Reading genotype data in chunks of size {} ...".format(CHUNK_SIZE))
+	vcf.log.info("Reading genotype data in chunks of size {} ...".format(args.chunk_size))
 	for site in vcf:
 
-		ii += 1
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites [{} kept] ...".format(ii-1, nused))
-
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
-
-		this_geno = site.gt_types/2 * site.ploidy
-		ac = np.sum(np.ma.masked_values(this_geno, 3))
-		an = np.sum(this_geno == 3)
-		if ac == 2*an or ac == 0:
+		this_geno = site.to_n_alt()/site.ploidy
+		ac = np.sum(this_geno)
+		an = np.sum(~this_geno.mask)
+		if ac == an or ac == 0:
 			continue
 		nused += 1
 
 		if nused >= geno.shape[0]:
-			log.debug("Increasing array allocation ... ")
-			geno = np.append( geno, give_chunk(), axis = 0 )
-			geno_imputed = np.append( geno_imputed, give_chunk(), axis = 0 )
+			vcf.log.debug("Increasing array allocation ... ")
+			geno = vcf.add_chunk(geno, args.chunk_size)
+			geno_imputed = vcf.add_chunk(geno_imputed, args.chunk_size)
 
 		## get genotype calls as number of alt alleles
-		this_geno = site.gt_types/2 * site.ploidy
+		this_geno = site.to_n_alt()
 		geno[nused,:] = this_geno[:]
 
 		## impute PLAF for missing values
-		plaf = np.average(this_geno[ this_geno != 3 ])
+		plaf = np.average(this_geno)
 		ww = this_geno[:]
-		ww[ ww == 3 ] = plaf
+		ww[ ww.mask ] = plaf
 		geno_imputed[nused,:] = ww
+
+	vcf.add_counter("nused","sites had usable data", nused)
+	vcf.show_count_summary()
 
 	geno = geno[ :nused, : ]
 	geno_imputed = geno_imputed[ :nused, : ]
-	log.info("Dimensions of full genotype matrix: {}".format(geno_imputed.shape))
+	vcf.log.info("Dimensions of full genotype matrix: {}".format(geno_imputed.shape))
 
-	log.info("Calculating pairwise distances ...")
+	vcf.log.info("Calculating pairwise distances ...")
 	D = squareform( pairwise_distance(geno_imputed, "hamming") )
 	D = 1 - D
 	formatter = "{:0." + str(args.digits) + "f}"
@@ -499,7 +399,7 @@ def calc_ibs_dist(vcf, log, ns, **kwargs):
 			print(vcf.samples[jj], *rounded, sep = "\t")
 	else:
 		combos = list( it.combinations(range(0, len(vcf.samples)), 2) )
-		log.info("\t[{} combinations]".format(len(combos)))
+		vcf.log.info("\t[{} combinations]".format(len(combos)))
 		ii = 0
 		for sa,sb in combos:
 			ii += 1
@@ -511,30 +411,21 @@ def calc_ibs_dist(vcf, log, ns, **kwargs):
 				log.info("\t... {} pairs done ...".format(ii))
 			print(vcf.samples[sa], vcf.samples[sb], nz, formatter.format(d), sep = "\t")
 
-	log.info("Done.\n")
+	vcf.log.info("Done.\n")
 
-def summarise_dp(vcf, log, ns, **kwargs):
+def summarise_dp(vcf, **kwargs):
 
 	args = argparse.Namespace(**kwargs)
 
-	CHUNK_SIZE = args.chunk_size
-	sample_dp = np.zeros((CHUNK_SIZE,len(vcf.samples)), dtype = np.int)
+	sample_dp = vcf.add_chunk(None, args.chunk_size, np.int)
 
 	## loop on VCF and add take sample depths
-	ii = 0
-	log.info("Processing VCF file ...")
+	vcf.log.info("Processing VCF file ...")
 	for site in vcf:
 
-		ii += 1
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
-
 		if ii >= sample_dp.shape[0]:
-			log.debug("Increasing array allocation ... ")
-			sample_dp = np.append( sample_dp, np.zeros((CHUNK_SIZE,len(vcf.samples)), dtype = np.int), axis = 0 )
+			vcf.log.debug("Increasing array allocation ... ")
+			sample_dp = vcf.add_chunk(sample_dp, args.chunk_size)
 
 		this_dp = site.format("DP").T[0:]
 		this_dp[ this_dp < 0 ] = 0
@@ -547,14 +438,11 @@ def summarise_dp(vcf, log, ns, **kwargs):
 	for iid, _mu, _med, _sigma in zip(vcf.samples, mu, med, sigma):
 		print(iid, "{:.1f}".format(_mu), "{:.1f}".format(_med), "{:.3f}".format(_sigma), sep = "\t")
 
-	log.info("Done.".format(ii))
-	log.info("\t{: >12d} total sites".format(ii))
+	vcf.show_count_summary()
 
-
-def summarise_flt(vcf, log, ns, **kwargs):
+def summarise_flt(vcf, **kwargs):
 
 	## loop on VCF and add take sample depths
-	ii = 0
 	what_mode = None
 	if args.samples:
 		counter = (
@@ -566,21 +454,12 @@ def summarise_flt(vcf, log, ns, **kwargs):
 		counter = defaultdict(int)
 		what_mode = "SITES"
 	else:
-		log.error("Must specify either --sites or --samples.")
+		vcf.log.error("Must specify either --sites or --samples.")
 		sys.exit(1)
 
-	log.info("Talling filters by {}".format(what_mode))
-	log.info("Processing VCF file ...")
+	vcf.log.info("Talling filters by {}".format(what_mode))
+	vcf.log.info("Processing VCF file ...")
 	for site in vcf:
-
-		ii += 1
-
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
-
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
 
 		site_filt = "PASS" if site.FILTER is None else site.FILTER
 		if what_mode == "SITES":
@@ -608,14 +487,11 @@ def summarise_flt(vcf, log, ns, **kwargs):
 				for filt,count in counter[jj][iid].items():
 					print(iid, flag, filt, count, sep = "\t")
 
-	log.info("Done.".format(ii))
-	log.info("\t{: >12d} total sites".format(ii))
+	vcf.show_count_summary()
 
-
-def calc_missingness(vcf, log, ns, **kwargs):
+def calc_missingness(vcf, **kwargs):
 
 	## loop on VCF and count missing calls
-	ii = 0
 	what_mode = None
 	if args.samples:
 		counts = np.zeros(len(vcf.samples), dtype = np.int)
@@ -623,21 +499,12 @@ def calc_missingness(vcf, log, ns, **kwargs):
 	elif args.sites:
 		what_mode = "SITES"
 	else:
-		log.error("Must specify either --sites or --samples.")
+		vcf.log.error("Must specify either --sites or --samples.")
 		sys.exit(1)
 
-	log.info("Talling missingness by {}".format(what_mode))
-	log.info("Processing VCF file ...")
+	vcf.log.info("Talling missingness by {}".format(what_mode))
+	vcf.log.info("Processing VCF file ...")
 	for site in vcf:
-
-		ii += 1
-
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
-
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
 
 		if what_mode == "SITES":
 			nmiss = np.sum(site.gt_types == 3)
@@ -653,18 +520,17 @@ def calc_missingness(vcf, log, ns, **kwargs):
 		for iid,nmiss in zip(vcf.samples, counts):
 			print(iid, nmiss, nmiss/ii, sep = "\t")
 
-	log.info("Done.".format(ii))
-	log.info("\t{: >12d} total sites".format(ii))
+	vcf.show_count_summary()
 
-def polarize_anc_vs_der(vcf, log, ns, **kwargs):
+def polarize_anc_vs_der(vcf, **kwargs):
 
 	## connect to ancestral genome file
 	genome = Fasta(args.fasta)
-	log.info("Ancestral genome: <{}>".format(args.fasta))
+	vcf.log.info("Ancestral genome: <{}>".format(args.fasta))
 
 	## modify outgoing VCF header
 	vcf.add_info_to_header({ "ID": "AA", "Description": "Ancestral allele inferred from outgroup", "Number": 1, "Type": "String" })
-	sys.stdout.write(vcf.raw_header)
+	vcf.write_header()
 
 	def define_anc_allele(alleles, og):
 		ref = alleles[0].upper()
@@ -679,21 +545,11 @@ def polarize_anc_vs_der(vcf, log, ns, **kwargs):
 		return anc
 
 	## loop on VCF and add 'AA' tag
-	nanc = 0
-	nder = 0
-	nmissing = 0
-	ii = 0
-	log.info("Processing VCF file ...")
+	vcf.add_counter("nmiss","sites have undefined ancestral allele")
+	vcf.add_counter("nanc","sites have REF == ancestral")
+	vcf.add_counter("nder","sites have REF == derived")
+	vcf.log.info("Processing VCF file ...")
 	for site in vcf:
-
-		ii += 1
-
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
-
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
 
 		start = site.POS - 1
 		end = start + len(site.REF)
@@ -703,29 +559,24 @@ def polarize_anc_vs_der(vcf, log, ns, **kwargs):
 		#print(og, alleles, anc, file = sys.stderr)
 
 		if anc == "X":
-			nmissing += 1
+			vcf.counters["nmiss"].increment()
 		elif anc == alleles[0]:
-			nder += 1
+			vcf.counters["nanc"].increment()
 		elif anc in alleles[1:]:
-			nanc += 1
+			vcf.counters["nder"].increment()
 
 		site.INFO["AA"] = anc
-		sys.stdout.write(str(site))
+		site.write_out()
 
-	log.info("Done.".format(ii))
-	log.info("\t{: >12d} had undefined ancestral allele".format(nmissing))
-	log.info("\t{: >12d} have REF = ancestral".format(nder))
-	log.info("\t{: >12d} have REF = derived".format(nanc))
-	log.info("\t------------")
-	log.info("\t{: >12d} total sites".format(ii))
+	vcf.show_count_summary()
 
-def transition_or_transversion(vcf, log, ns, **kwargs):
+def transition_or_transversion(vcf, **kwargs):
 
 	## modify outgoing VCF header
 	vcf.add_info_to_header({ "ID": "Transversion", "Description": "Is this site a transition (0), transversion (1), or undefined (-1)?", "Number": 1, "Type": "Integer" })
 	vcf.add_info_to_header({ "ID": "StrongWeak", "Description": "H-bond strength of ancestral and derived states (w=weak, s=strong)", "Number": 1, "Type": "String" })
 	vcf.add_info_to_header({ "ID": "BGC", "Description": "Is this site a candidate for GC-biased gene coversion? 0=No, 1=Yes, -1=undefined", "Number": 1, "Type": "Integer" })
-	sys.stdout.write(vcf.raw_header)
+	vcf.write_header()
 
 	def ti_or_tv(anc, der):
 		anc = anc.upper()
@@ -763,25 +614,15 @@ def transition_or_transversion(vcf, log, ns, **kwargs):
 	#nbadprefix = 0
 	nbadallele = 0
 	nmulti = 0
-	ii = 0
-	log.info("Processing VCF file ...")
+	vcf.add_standard_counter("multiallelic")
+	vcf.log.info("Processing VCF file ...")
 	for site in vcf:
-
-		ii += 1
-
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
-
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
 
 		if not (site.is_snp and not site.is_indel):
 			nnotsnv += 1
 			continue
 
-		if len(site.ALT) > 1:
-			nmulti += 1
+		if site.is_multiallelic:
 			continue
 
 		if not good_alleles([site.REF] + site.ALT):
@@ -789,22 +630,9 @@ def transition_or_transversion(vcf, log, ns, **kwargs):
 			continue
 
 		## absent or bogus ancestral allele?
-		anc = "X"
-		try:
-			anc = site.INFO["AA"]
-			#log.info("Ancestral allele is '{}'".format(anc))
-		except KeyError as e:
-			nnoanc += 1
-			continue
-
-		if anc == "X":
-			nnoanc += 1
-			continue
-
-		if anc == site.REF:
-			der = site.ALT[0]
-		elif anc == site.ALT[0]:
-			der = site.REF
+		if site.has_ancestral:
+			anc = site.ancestral
+			der = site.derived
 		else:
 			nnoanc += 1
 			continue
@@ -822,154 +650,86 @@ def transition_or_transversion(vcf, log, ns, **kwargs):
 		site.INFO["StrongWeak"] = sw
 		site.INFO["BGC"] = bgc
 
-		sys.stdout.write(str(site))
+		site.write_out()
 
-	log.info("Done.".format(ii))
-	log.info("\t{: >12d} not SNVs".format(nnotsnv))
-	log.info("\t{: >12d} with >2 alleles".format(nmulti))
-	log.info("\t{: >12d} with bad allele(s)".format(nbadallele))
-	log.info("\t{: >12d} transitions".format(nti))
-	log.info("\t{: >12d} transversions".format(ntv))
-	log.info("\t{: >12d} gBGC candidates".format(nbgc))
-	log.info("\t------------")
-	log.info("\t{: >12d} total sites".format(ii))
-	log.info("\t[ TiTv = {:0.3f} ]".format(nti/ntv))
+	vcf.add_counter("nnotsnv","sites not SNVs", nnotsnv)
+	vcf.add_counter("nbad","sites with bad allele(s)", nbadallele)
+	vcf.add_counter("nti","transitions", nti)
+	vcf.add_counter("ntv","transversions", ntv)
+	vcf.add_counter("nbgc","gBGC candidates", nbgc)
+	vcf.show_count_summary()
+	vcf.log.info("\t[ TiTv = {:0.3f} ]".format(nti/ntv))
 
-def count_derived(vcf, log, ns, **kwargs):
+def count_derived(vcf, **kwargs):
 
 	args = argparse.Namespace(**kwargs)
 	if not (args.reads or args.calls) or (args.reads and args.calls):
-		log.error("Must specify either `--calls` OR `--reads`, and not both.")
+		vcf.log.error("Must specify either `--calls` OR `--reads`, and not both.")
 		sys.exit(1)
 
 	how_count = "READS" if args.reads else "GENOTYPE CALLS"
-	log.info("Counting derived alleles at level of {}".format(how_count))
+	vcf.log.info("Counting derived alleles at level of {}".format(how_count))
 
 	## initialize counters
-	what_type = np.int if args.calls else np.float
+	what_type = np.float if args.calls else np.float
 	counts = np.zeros(len(vcf.samples), dtype = what_type)
 	nsites = np.zeros(len(vcf.samples), dtype = np.int)
 
 	## loop on VCF
-	ploidy = None
-	nambig = 0
-	npol = 0
-	nmulti = 0
-	nuncountable = 0
-	nused = 0
-	ii = 0
-	log.info("Processing VCF file ...")
+	vcf.add_counter("nused","sites had usable data")
+	vcf.add_standard_counter("noancestral")
+	vcf.add_standard_counter("multiallelic")
+	if args.reads:
+		vcf.add_standard_counter("nowsaf")
+	vcf.log.info("Processing VCF file ...")
 	for site in vcf:
 
-		ii += 1
-
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
-
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
-
-		## absent or bogus ancestral allele?
-		anc = "X"
-		try:
-			anc = site.INFO["AA"]
-			#log.info("Ancestral allele is '{}'".format(anc))
-		except KeyError as e:
-			nambig += 1
-			continue
-
-		if anc == "X":
-			nambig += 1
-			continue
-
-		npol += 1
-
 		## not biallelic?
-		if len(site.ALT) > 1:
-			nmulti += 1
+		if site.is_multiallelic:
 			continue
-
-		## sniff ploidy
-		if ploidy is None:
-			#pieces = resplit(r"[/|]", site.gt_bases[0])
-			#ploidy = len(pieces)
-			ploidy = site.ploidy
-			log.info("Detected ploidy = {} in this VCF".format(ploidy))
 
 		## biallelic, has non-bogus ancestral allele
 		if args.reads:
-			if not "WSAF" in site.FORMAT:
-				nuncountable += 1
+			if not site.has_wsaf:
 				continue
 			else:
-				gt = site.format("WSAF")[:,0]
+				gt = site.get_wsaf()
 				if not site.REF == anc:
 					gt = 1 - gt
-				nsites[ gt > -1 ] += 1
-				counts[ gt != -1 ] += gt[ gt != -1 ]
-				nused += 1
+				nsites[ ~gt.mask ] += 1
+				counts[ ~gt.mask ] += gt[ ~gt.mask ]
+				vcf.counters["nused"].increment()
 		else:
-			gt = site.gt_types
-			nsites[ gt < 3 ] += 1
-			counts[ gt < 3 ] += gt[ gt < 3 ]
-			nused += 1
+			gt = site.to_n_der()
+			nsites[ ~gt.mask ] += 1
+			counts[ ~gt.mask ] += gt[ ~gt.mask ]
+			vcf.counters["nused"].increment()
 
 	if args.calls:
-		counts = counts/2 * ploidy
+		counts = counts/vcf.ploidy
 	for jj,iid in enumerate(vcf.samples):
-		print(iid, counts[jj], nsites[jj], counts[jj]/nsites[jj], ploidy, sep = "\t")
+		print(iid, counts[jj], nsites[jj], counts[jj]/nsites[jj], vcf.ploidy, sep = "\t")
 
-	log.info("Done.")
-	log.info("\t{: >12d} had usable data".format(nused))
-	log.info("\t{: >12d} had undefined ancestral allele".format(nambig))
-	log.info("\t{: >12d} had >2 alleles".format(nmulti))
-	if args.reads:
-		log.info("\t{: >12d} had no WSAF annotation".format(nuncountable))
-	log.info("\t------------")
-	log.info("\t{: >12d} total sites".format(ii))
+	vcf.show_count_summary()
 
-def flag_private(vcf, log, ns, **kwargs):
+def flag_private(vcf, **kwargs):
 
 	## load args into a namespace, so I don't have to recode so much stuff
 	args = argparse.Namespace(**kwargs)
 
 	## identify private alleles by hard calls or read counts?
 	if not (args.reads or args.calls) or (args.reads and args.calls):
-		log.error("Must specify either `--calls` OR `--reads`, and not both.")
+		vcf.log.error("Must specify either `--calls` OR `--reads`, and not both.")
 		sys.exit(1)
 
 	how_count = "READS" if args.reads else "GENOTYPE CALLS"
 	what_count = "READS" if args.reads else "CHROMOSOMES"
-	log.info("Defining private alleles at level of {}".format(how_count))
-	log.info("Cutoff for allele presence: {} supporting {}".format(args.min_count, what_count))
+	vcf.log.info("Defining private alleles at level of {}".format(how_count))
+	vcf.log.info("Cutoff for allele presence: {} supporting {}".format(args.min_count, what_count))
 
 	## decide which samples to use
-	if args.samples_file:
-		keep_samples = []
-		for line in args.samples_file:
-			if line.startswith("#"):
-				continue
-			else:
-				iid = line.strip().split().pop(0)
-				if not iid in vcf.samples:
-					log.warning("Sample '{}' in populations file but not in VCF; skpping it.".format(iid))
-					continue
-				keep_samples.append(iid)
-		log.info("Read {} samples from file <{}>".format(len(keep_samples), args.samples_file.name))
-	elif len(args.samples):
-		keep_samples = []
-		for iid in args.samples:
-			keep_samples.extend(resplit("[,;|]", iid))
-		log.info("Read {} samples from command line".format(len(keep_samples)))
-	else:
-		log.error("Must specify at least one focal sample.")
-		sys.exit(1)
-
-	keep_samples = set(vcf.samples) & set(keep_samples)
-	keep_samples = list(keep_samples)
+	keep_samples = vcf.reconcile_samples(args.samples, args.samples_file)
 	nsamples = len(keep_samples)
-	log.info("Retained {} distinct samples that were verified in VCF header.".format(nsamples))
 
 	## get sample positions in input VCF
 	focal_idx = [ vcf.samples.index(_) for _ in keep_samples ]
@@ -986,211 +746,132 @@ def flag_private(vcf, log, ns, **kwargs):
 
 	## modify outgoing VCF header
 	vcf.add_info_to_header({ "ID": args.flag, "Description": "Private allele in specified subset", "Type": "Flag", "Number": "1"})
-	sys.stdout.write(vcf.raw_header)
+	vcf.write_header()
 
-	nused = 0
-	nnodp = 0
-	nmulti = 0
-	npriv = 0
-	ii = 0
-	log.info("Processing VCF file ...")
+	vcf.add_counter("nused","sites had usable data")
+	vcf.add_counter("nnodp","sites had no AD annotations")
+	vcf.add_counter("nmulti","sites had >2 alleles")
+	vcf.add_counter("npriv","private sites")
+	vcf.log.info("Processing VCF file ...")
 	for site in vcf:
-
-		ii += 1
-
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
-
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
 
 		## not biallelic?
 		if len(site.ALT) > 1:
-			nmulti += 1
+			vcf.counters["nmulti"].increment()
 			continue
 
 		if args.reads:
-			if not "AD" in site.FORMAT:
-				nnodp += 1
+			if not site.has_format("AD"):
+				vcf.counters["nnodp"].increment()
 				continue
 			else:
-				nused += 1
+				vcf.counters["nused"].increment()
 			counts = site.format("AD")[:,1]
 		else:
-			nused += 1
+			vcf.counters["nused"].increment()
 			counts = site.gt_types[:]
 
 		if is_private(counts):
-			npriv += 1
+			vcf.counters["npriv"].increment()
 			site.INFO[args.flag] = True
 
-		sys.stdout.write(str(site))
+		site.write_out()
 
-	log.info("Done.")
-	log.info("\t{: >12d} had usable data".format(nused))
-	log.info("\t[{: >12d} flagged private to {} samples]".format(npriv, nsamples))
-	if args.reads:
-		log.info("\t{: >12d} had no AD annotation".format(nnodp))
-	log.info("\t{: >12d} had >2 alleles".format(nmulti))
-	log.info("\t------------")
-	log.info("\t{: >12d} total sites".format(ii))
+	vcf.show_count_summary()
 
-def calc_sfs(vcf, log, ns, **kwargs):
+def calc_sfs(vcf, **kwargs):
 
 	## load args into a namespace, so I don't have to recode so much stuff
 	args = argparse.Namespace(**kwargs)
 
 	## set RNG seed
 	if args.seed >= 0:
-		log.info("RNG seed := {}".format(args.seed))
+		vcf.log.info("RNG seed := {}".format(args.seed))
 		np.random.seed(args.seed)
 	else:
-		log.info("RNG seed := auto [!! NON-REPRODUCIBLE !!]")
+		vcf.log.info("RNG seed := auto [!! NON-REPRODUCIBLE !!]")
 
 	## calculate SFS by hard calls or read counts?
 	if not (args.reads or args.calls) or (args.reads and args.calls):
-		log.error("Must specify either `--calls` OR `--reads`, and not both.")
+		vcf.log.error("Must specify either `--calls` OR `--reads`, and not both.")
 		sys.exit(1)
 
 	how_count = "READ COUNTS" if args.reads else "GENOTYPE CALLS"
-	log.info("Calculating uSFS from {}".format(how_count))
+	vcf.log.info("Calculating uSFS from {}".format(how_count))
 
-	if not args.pops:
-		log.info("Treating all samples in VCF as coming from one population.")
-		pops = defaultdict(list)
-		pops["pop1"].extend( list(range(0, len(vcf.samples))) )
-	else:
-		log.info("Reading population assignments from <{}>".format(args.pops.name))
-		## decide which samples to use
-		pops = defaultdict(list)
-		seen = defaultdict(int)
-		for line in args.pops:
-			if line.startswith("#"):
-				continue
-			pieces = line.strip().split()
-			# not an iid,pop tuple? skip
-			if len(pieces) < 2:
-				continue
-			iid, pop = pieces[:2]
-			# sample not in VCF? skip
-			if not iid in vcf.samples:
-				log.warning("Sample '{}' in populations file but not in VCF; skpping it.".format(iid))
-				continue
-			# already seen this sample? assume first assignment was right
-			if iid in seen:
-				continue
-			else:
-				seen[iid] += 1
-			# finally, add sample to population
-			pops[pop].append( vcf.samples.index(iid) )
-
-	pop_order = sorted(pops, key = lambda k: -1*len(pops[k]))
+	pop_order, pops = vcf.reconcile_populations(args.pops)
 	ssz = [ len(pops[_]) for _ in pop_order ]
 	dims = tuple([ _ + 1 for _ in ssz ])
 
-	log.info("Populations and their sizes:")
-	for ii,pop in enumerate(pops.keys()):
-		log.info("\t{}  {: >4d}".format(pop, ssz[ii]))
-
-	log.info("SFS will have these dimensions: {}".format(dims))
+	vcf.log.info("SFS will have these dimensions: {}".format(dims))
 
 	def ivl_to_region(ivl):
-		return "{}:{}-{}".format(ivl.chrom, ivl.start+1, ivl.end)
+		return "{}:{}-{}".format(ivl.chrom, ivl.start+1, ivl.end), ivl.name
 
 	## loop on VCF
 	if args.windows is None:
-		regions = [None]
-		log.info("Processing VCF file in one slurp ...")
+		regions = [ (None,None) ]
+		vcf.log.info("Processing VCF file in one slurp ...")
 	else:
 		regions = map(ivl_to_region, pbt.BedTool(args.windows))
-		log.info("Processing VCF file in chunks defined in <{}> ...".format(args.windows.name))
-	all_sfs = []
+		vcf.log.info("Processing VCF file in chunks defined in <{}> ...".format(args.windows.name))
+	all_sfs = OrderedDict()
 
-	nused = 0
-	nnodp = 0
-	nmulti = 0
-	nnoanc = 0
-	ii = 0
+	vcf.add_counter("nused","had usable data")
+	vcf.add_standard_counter("noancestral")
+	if args.reads:
+		vcf.add_standard_counter("nowsaf")
+	vcf.add_standard_counter("multiallelic")
+
 	ploidy = None
+	nr = 0
+	for region,rname in regions:
 
-	for region in regions:
+		nr += 1
+		if rname is None or rname == ".":
+			rname = "region{:06d}".format(nr)
 
 		## initialize SFS
 		sfs = np.zeros(dims, dtype = np.int)
 
-		for site in vcf(region = region):
+		for site in vcf.fetch_region(region):
 
-			## sniff ploidy
 			if ploidy is None:
-				#pieces = resplit(r"[/|]", site.gt_bases[0])
-				#ploidy = len(pieces)
-				ploidy = site.ploidy
-				log.info("Detected ploidy = {} in this VCF".format(ploidy))
+				ploidy = vcf.ploidy
+				vcf.log.info("Detected ploidy = {} in this VCF".format(ploidy))
 
-			ii += 1
-
-			if (ii-1) and not (ii-1) % 1000:
-				log.info("\t... processed {} sites ...".format(ii-1))
-
-			if ii > ns and ns > -1:
-				ii -= 1
-				break
-
-			## not biallelic?
-			if len(site.ALT) > 1:
-				nmulti += 1
+			if site.is_multiallelic or (not site.has_ancestral and not args.ref_is_ancestral):
 				continue
 
-			## no ancestral allele?
-			anc = "X"
-			try:
-				anc = site.INFO["AA"]
-				#log.info("Ancestral allele is '{}'".format(anc))
-			except KeyError as e:
-				pass
-
-			if anc == "X":
-				if args.ref_is_ancestral:
-					anc = site.REF
-				else:
-					nnoanc += 1
-					continue
-
 			if args.reads:
-				if not "WSAF" in site.FORMAT:
-					nnodp += 1
+				if not site.has_wsaf:
 					continue
 				else:
-					nused += 1
-				counts = site.format("WSAF")[:,0]
+					vcf.counters["nused"].increment()
+				counts = site.get_wsaf()
 				sampled = np.zeros(len(ssz), dtype = np.int)
 				for jj,pop in enumerate(pop_order):
 					these_counts = counts[ pops[pop] ]
-					if np.all(these_counts == -1):
+					if np.all(these_counts.mask):
+						## all missing values
 						continue
-					good_counts = these_counts[ these_counts > -1 ]
-					maf = np.average(good_counts)
-					these_counts[ these_counts == -1 ] = maf
-					if not anc == site.REF:
+					these_counts, _ = site.get_imputed_wsaf()
+					if site.alt_is_ancestral:
 						these_counts = 1 - these_counts
 					sampled[jj] = np.sum(np.random.binomial(1, these_counts))
 				sampled = tuple(sampled)
 			else:
-				nused += 1
-				counts = site.gt_types[:]
+				vcf.counters["nused"].increment()
+				#print(site.REF, site.ALT, site.has_ancestral, site.ancestral, site.derived)
+				counts = site.to_n_der()/ploidy
 				sampled = np.zeros(len(ssz), dtype = np.int)
 				for jj,pop in enumerate(pop_order):
 					these_counts = counts[ pops[pop] ]
-					omit = (these_counts == 3)
-					if np.all(omit):
+					maf = np.average(these_counts)
+					if np.all(these_counts.mask):
+						## all missing values
 						continue
-					these_counts = these_counts/2*ploidy
-					good_counts = these_counts[ ~omit ]
-					maf = np.average(good_counts)
-					these_counts[ omit ] = maf
-					if not anc == site.REF:
-						these_counts = 1 - these_counts
+					these_counts[ these_counts.mask ] = maf
 					sampled[jj] = np.sum(np.random.binomial(1, these_counts))
 				sampled = tuple(sampled)
 
@@ -1199,72 +880,54 @@ def calc_sfs(vcf, log, ns, **kwargs):
 
 		## done with inner loop; record this sfs
 		if region is None:
-			log.info("Finished region [whole VCF]; cumulative total {} sites [{} used].".format(ii, nused))
+			vcf.log.info(" ... finished region [whole VCF]; cumulative total {} sites [{} used].".format(vcf.ii, vcf.counters["nused"].count))
 		else:
-			log.info("Finished region '{}'; cumulative total {} sites [{} used].".format(region, ii, nused))
+			vcf.log.info(" ... finished region {} (group '{}'); cumulative total {} sites [{} used].".format(region, rname, vcf.ii, vcf.counters["nused"].count))
 
-		all_sfs.append( sfs )
+		if rname in all_sfs:
+			all_sfs[rname] += sfs
+		else:
+			all_sfs[rname] = sfs
 
-	log.info("Done.")
-	log.info("\t{: >12d} had usable data".format(nused))
-	log.info("\t{: >12d} had undefined ancestral allele".format(nnoanc))
-	if args.reads:
-		log.info("\t{: >12d} had no WSAF annotation".format(nnodp))
-	log.info("\t{: >12d} had >2 alleles".format(nmulti))
-	log.info("\t------------")
-	log.info("\t{: >12d} total sites".format(ii))
+	vcf.show_count_summary()
 
+	vcf.log.info("Yielding {} spectra from {} regions.".format(len(all_sfs.keys()), nr))
 	print("#pops={}".format(",".join(pop_order)))
 	print("#dims={}".format(",".join([ str(_) for _ in dims ])))
-	print("#nsites={}".format(nused))
-	for this_sfs in all_sfs:
+	print("#nsites={}".format( vcf.counters["nused"].count ))
+	for group_name, this_sfs in all_sfs.items():
 		print(*this_sfs.flatten(), sep = " ")
 
-def thin_sites(vcf, log, ns, **kwargs):
+def thin_sites(vcf, **kwargs):
 
 	## load args into a namespace, so I don't have to recode so much stuff
 	args = argparse.Namespace(**kwargs)
 
 	## write outgoing VCF header
-	sys.stdout.write(str(vcf.raw_header))
+	vcf.write_header()
 
-	ii = 0
-	nkept = 0
-	log.info("Processing VCF file ...")
+	vcf.add_counter("nkept","sites kept")
+	vcf.add_counter("ndropped","sites discarded")
+	vcf.log.info("Processing VCF file ...")
 	for site in vcf:
+		if not vcf.ii % args.every:
+			vcf.counters["nkept"].increment()
+			site.write_out()
+		else:
+			vcf.counters["ndropped"].increment()
 
-		ii += 1
+	## finish up
+	vcf.show_count_summary()
 
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
-
-		if ii > ns and ns > -1:
-			ii -= 1
-			break
-
-		if not ii % args.every:
-			nkept += 1
-			sys.stdout.write(str(site))
-
-	log.info("Done.")
-	log.info("\t{: >12d} kept ({:0.3f}%)".format(nkept, 100*nkept/ii))
-	log.info("\t{: >12d} discarded".format(ii-nkept))
-	log.info("\t------------")
-	log.info("\t{: >12d} total sites".format(ii))
-
-def prune_sites_by_ld(vcf, log, ns, **kwargs):
+def prune_sites_by_ld(vcf, **kwargs):
 
 	## load args into a namespace, so I don't have to recode so much stuff
 	args = argparse.Namespace(**kwargs)
 
 	## write outgoing VCF header
-	sys.stdout.write(str(vcf.raw_header))
+	vcf.write_header()
 
-	CHUNK_SIZE = args.chunk_size
-	def give_chunk():
-		return np.zeros((CHUNK_SIZE,len(vcf.samples)), dtype = np.float)
-
-	log.info("Performing LD pruning to r^2 <= {:0.3f} in windows of {} sites (stepping by {})".format(args.r_squared, args.window, args.step))
+	vcf.log.info("Performing LD pruning to r^2 <= {:0.3f} in windows of {} sites (stepping by {})".format(args.r_squared, args.window, args.step))
 	## straight from <http://alimanfoo.github.io/2015/09/28/fast-pca.html>
 	def ld_prune(gn, size, step, threshold = 0.1, n_iter = 1):
 		idx = np.arange(gn.shape[0])
@@ -1272,19 +935,19 @@ def prune_sites_by_ld(vcf, log, ns, **kwargs):
 			loc_unlinked = locate_unlinked(gn, size=size, step=step, threshold=threshold)
 			n = np.count_nonzero(loc_unlinked)
 			n_remove = gn.shape[0] - n
-			log.info("\t ... iteration {}: retaining {} of {} sites".format(i, n, gn.shape[0]))
+			vcf.log.info("\t ... iteration {}: retaining {} of {} sites".format(i, n, gn.shape[0]))
 			gn = gn[ loc_unlinked,... ]
 			idx = idx[ loc_unlinked ]
 		return idx
 
 	## read genotypes to matrix, one chromosome at a time
-	ii = 0
 	nkept = 0
-	ntot = 0
-	log.info("Processing VCF file ...")
+	vcf.add_counter("ntot","sites retained")
+	vcf.add_counter("ndropped","sites pruned for LD")
+	vcf.log.info("Processing VCF file ...")
 	last_chrom = None
 	pos = []
-	geno = give_chunk()
+	geno = vcf.add_chunk(None, args.chunk_size, np.float)
 
 	## while instead of for-loop to avoid gymnasitcs at ends of chrosomes
 	# while True:
@@ -1296,32 +959,25 @@ def prune_sites_by_ld(vcf, log, ns, **kwargs):
 	# 		break
 
 	for site in vcf:
+
 		# increment counters
-		ii += 1
 		nkept += 1
-
-		if (ii-1) and not (ii-1) % 1000:
-			log.info("\t... processed {} sites ...".format(ii-1))
-
-		if ii > ns and ns > -1:
-			ii -= 1
-			nkept -= 1
-			break
 
 		# increase array allocation, if needed
 		if nkept >= geno.shape[0]:
-			log.debug("Increasing array allocation {} --> {} ... ".format(geno.shape[0], geno.shape[0]+CHUNK_SIZE))
-			geno = np.append( geno, give_chunk(), axis = 0 )
+			vcf.log.debug("Increasing array allocation {} --> {} ... ".format(geno.shape[0], geno.shape[0]+args.chunk_suze))
+			geno = vcf.add_chunk(geno, args.chunk_size)
 
 		if last_chrom and last_chrom != site.CHROM:
 			# started new chromosome; calculate LD, reset containers and keep going
-			log.info("Pruning sites on chromosome '{}'".format(last_chrom))
+			vcf.log.info("Pruning {} sites on chromosome '{}'".format(nkept, last_chrom))
 			keep = ld_prune(geno[:(nkept-1),:], args.window, args.step, args.r_squared, args.niter)
-			log.debug("{} {} {}".format(nkept-1, np.max(keep), len(pos)))
+			vcf.log.debug("{} {} {}".format(nkept-1, np.max(keep), len(pos)))
+			#vcf.counters["ndropped"].increment( (nkept-1)-len(keep) )
 			for jj in keep:
-				ntot += 1
-				sys.stdout.write(str(pos[jj]))
-			geno = give_chunk()
+				vcf.counters["ntot"].increment()
+				pos[jj].write_out()
+			geno = vcf.add_chunk(None, args.chunk_size)
 			pos = []
 			nkept = 0
 			last_chrom = str(site.CHROM)
@@ -1333,19 +989,228 @@ def prune_sites_by_ld(vcf, log, ns, **kwargs):
 		pos.append(str(site))
 
 	## done with file; flush buffers
-	log.info("Pruning sites on chromosome '{}'".format(last_chrom))
+	vcf.log.info("Pruning {} sites on chromosome '{}'".format(nkept, last_chrom))
 	keep = ld_prune(geno[:nkept,:], args.window, args.step, args.r_squared, args.niter)
-	log.debug("{} {} {}".format(nkept, np.max(keep), len(pos)))
+	vcf.log.debug("{} {} {}".format(nkept, np.max(keep), len(pos)))
+	#vcf.counters["ndropped"].increment( nkept-len(keep) )
 	for jj in keep:
-		ntot += 1
-		sys.stdout.write(str(pos[jj]))
+		vcf.counters["ntot"].increment()
+		pos[jj].write_out()
 
-	log.info("Done.")
-	log.info("\t{: >12d} sites in approx linkage equilibrium ({:0.3f}%)".format(ntot, 100*ntot/ii))
-	log.info("\t{: >12d} pruned for LD".format(ii-ntot))
-	log.info("\t------------")
-	log.info("\t{: >12d} total sites".format(ii))
+	## finish up
+	vcf.counters["ndropped"].increment( vcf.ii - vcf.counters["ntot"].count )
+	vcf.show_count_summary()
 
+
+def get_threepop_combos(x):
+
+	seen = []
+	for a,b,c in permutations(x, 3):
+		if (a,c,b) in seen:
+			continue
+		else:
+			seen.append( (a,b,c) )
+	return seen
+
+def get_fourpop_combos(x):
+
+	seen = []
+	for a,b,c,d in permutations(x, 4):
+		if (b,a,c,d) in seen:
+			# permute first pair
+			continue
+		elif (a,b,d,c) in seen:
+			# permute second pair
+			continue
+		elif (b,a,d,c) in seen:
+			# permute both pairs
+			continue
+		else:
+			seen.append( (a,b,c,d) )
+	return seen
+
+def calc_f3(vcf, **kwargs):
+
+	## load args into a namespace, so I don't have to recode so much stuff
+	args = argparse.Namespace(**kwargs)
+
+	if not (args.reads or args.calls) or (args.reads and args.calls):
+		vcf.log.error("Must specify either `--calls` OR `--reads`, and not both.")
+		sys.exit(1)
+
+	how_count = "READS" if args.reads else "GENOTYPE CALLS"
+	vcf.log.info("Counting derived alleles at level of {}".format(how_count))
+
+	## read in populations
+	pop_order, pops = vcf.reconcile_populations(args.pops)
+	if len(pop_order) < 3:
+		vcf.log.error("Need >= 3 populations to calculate f_3 statistics; only {} provided.".format(len(pop_order)))
+		sys.exit(1)
+
+	## get tuples representing 3-population combinations where order of last 2 doesn't matter
+	##    since f(C;A,B) == f(C;B,A)
+	combos = get_threepop_combos(pop_order)
+	vcf.log.info("There will be this many f_3 statistics to compute: {}.".format(len(combos)))
+
+	T = vcf.add_chunk(None, args.chunk_size)
+	B = vcf.add_chunk(None, args.chunk_size)
+
+	## loop on sites
+	nkept = 0
+	vcf.add_counter("nused","sites had usable data")
+	vcf.add_counter("nnodp","sites had no WSAF annotations")
+	vcf.add_counter("nmulti","sites had >2 alleles")
+	for site in vcf:
+
+		# increase array allocation, if needed
+		if vcf.ii >= T.shape[0]:
+			vcf.log.debug("Increasing array allocation {} --> {} ... ".format(T.shape[0], T.shape[0]+args.chunk_size))
+			T = vcf.add_chunk(T, args.chunk_size)
+			B = vcf.add_chunk(B, args.chunk_size)
+
+		if len(site.ALT) > 1:
+			vcf.counters["nmulti"].increment()
+			continue
+
+		if args.reads:
+			wsaf = site.get_wsaf()
+		elif args.calls:
+			wsaf = site.to_n_alt()/vcf.ploidy
+
+		if np.isnan(np.sum(wsaf)):
+			vcf.counters["nnodp"].increment()
+			continue
+
+		nkept += 1
+		## calculate allele freqs for each population; will use them repeatedly
+		freqs = {}
+		for pop in pop_order:
+			freqs[pop] = np.average(wsaf[ pops[pop] ])
+
+		#vcf.log.debug(freqs)
+		## now loop on population tuples and calculate numerator and denominator of f_3
+		for jj,(c,a,b) in enumerate(combos):
+			cprime = freqs[c]
+			aprime = freqs[a]
+			bprime = freqs[b]
+			Ti = (cprime - aprime)*(cprime - bprime)
+			Bi = 2*cprime*(1 - cprime)
+			T[ nkept, jj ] = Ti
+			B[ nkept, jj ] = Bi
+
+	vcf.counters["nused"].increment( nkept )
+	vcf.show_count_summary()
+
+	vcf.log.info("Estimating f_3 and its standard errors by block jackknife in blocks of size ~= {}".format(args.jackknife))
+	TB = np.hstack((T[ :nkept, : ],B[ :nkept,: ]))
+
+	def estimate_f3(data):
+		Tis = data[ :,:len(combos) ]
+		Bis = data[ :,len(combos): ]
+		num = np.sum(np.ma.masked_invalid(Tis), 0)
+		den = np.sum(np.ma.masked_invalid(Bis), 0)
+		return num/den
+
+	se, _ = block_jackknife(TB, estimate_f3, args.jackknife)
+	f3s = estimate_f3(TB)
+	zscores = f3s/se
+	formatter = "{:0.5f}"
+	for jj,(C,A,B) in enumerate(combos):
+		print(C, A, B, formatter.format(f3s[jj]), formatter.format(se[jj]), formatter.format(zscores[jj]), sep = "\t")
+
+	vcf.log.info("Done.")
+
+def calc_f4(vcf, **kwargs):
+
+	## load args into a namespace, so I don't have to recode so much stuff
+	args = argparse.Namespace(**kwargs)
+
+	if not (args.reads or args.calls) or (args.reads and args.calls):
+		vcf.log.error("Must specify either `--calls` OR `--reads`, and not both.")
+		sys.exit(1)
+
+	how_count = "READS" if args.reads else "GENOTYPE CALLS"
+	vcf.log.info("Counting derived alleles at level of {}".format(how_count))
+
+	## read in populations
+	pop_order, pops = vcf.reconcile_populations(args.pops)
+	if len(pop_order) < 4:
+		vcf.log.error("Need >= 4 populations to calculate f_4 statistics; only {} provided.".format(len(pop_order)))
+		sys.exit(1)
+
+	## get tuples representing 4-population combinations where order of last 2 doesn't matter
+	##    since f(W,X;A,B) == f(X,W;B,A) etc
+	combos = get_fourpop_combos(pop_order)
+	vcf.log.info("There will be this many f_4 statistics to compute: {}.".format(len(combos)))
+
+	T = vcf.add_chunk(None, args.chunk_size)
+	B = vcf.add_chunk(None, args.chunk_size)
+
+	## loop on sites
+	nkept = 0
+	vcf.add_counter("nused","sites had usable data")
+	vcf.add_counter("nnodp","sites had no WSAF annotations")
+	vcf.add_counter("nmulti","sites had >2 alleles")
+	for site in vcf:
+
+		# increase array allocation, if needed
+		if vcf.ii >= T.shape[0]:
+			vcf.log.debug("Increasing array allocation {} --> {} ... ".format(T.shape[0], T.shape[0]+args.chunk_size))
+			T = vcf.add_chunk(T, args.chunk_size)
+			B = vcf.add_chunk(B, args.chunk_size)
+
+		if len(site.ALT) > 1:
+			vcf.counters["nmulti"].increment()
+			continue
+
+		if args.reads:
+			wsaf = site.get_wsaf()
+		elif args.calls:
+			wsaf = site.to_n_alt()/vcf.ploidy
+
+		if np.isnan(np.sum(wsaf)):
+			vcf.counters["nnodp"].increment()
+			continue
+
+		nkept += 1
+		## calculate allele freqs for each population; will use them repeatedly
+		freqs = {}
+		for pop in pop_order:
+			freqs[pop] = np.average(wsaf[ pops[pop] ])
+
+		#vcf.log.debug(freqs)
+		## now loop on population tuples and calculate numerator and denominator of f_3
+		for jj,(w,x,y,z) in enumerate(combos):
+			wprime = freqs[w]
+			xprime = freqs[x]
+			yprime = freqs[y]
+			zprime = freqs[z]
+			Ti = (wprime - xprime)*(yprime - zprime)
+			Bi = (wprime + xprime - 2*wprime*xprime)*(yprime + zprime - 2*yprime*zprime)
+			T[ nkept, jj ] = Ti
+			B[ nkept, jj ] = Bi
+
+	vcf.counters["nused"].increment( nkept )
+	vcf.show_count_summary()
+
+	vcf.log.info("Estimating f_4 and its standard errors by block jackknife in blocks of size ~= {}".format(args.jackknife))
+	TB = np.hstack((T[ :nkept, : ],B[ :nkept,: ]))
+
+	def estimate_f4(data):
+		Tis = data[ :,:len(combos) ]
+		Bis = data[ :,len(combos): ]
+		num = np.sum(np.ma.masked_invalid(Tis), 0)
+		den = np.sum(np.ma.masked_invalid(Bis), 0)
+		return num/den
+
+	se, _ = block_jackknife(TB, estimate_f4, args.jackknife)
+	f4s = estimate_f4(TB)
+	zscores = f4s/se
+	formatter = "{:0.5f}"
+	for jj,(W,X,Y,Z) in enumerate(combos):
+		print(W,X,Y,Z, formatter.format(f4s[jj]), formatter.format(se[jj]), formatter.format(zscores[jj]), sep = "\t")
+
+	vcf.log.info("Done.")
 
 ## root-level argument parser
 def root_help_message(name = None):
@@ -1379,6 +1244,10 @@ def root_help_message(name = None):
 	      ibs               calculate simple identity-by-state (IBS) matrix from hard calls at polymorphic sites only
 	      pca               perform PCA using within-sample allele frequencies instead of hard calls
 
+	  --- Admixture
+	      f3stat           calculate Patterson's normalized f_3 statistic
+	      f4stat           calculate Patterson's normalized f_4 statistic, also known as the D-statistic
+
 	Notes:
 	* All commands that take VCF as input or output work on pipes. For basic filtering operations,
 	it is recommended to use `bcftools` and pipe to this tool.
@@ -1397,6 +1266,9 @@ parser.add_argument("-i","--infile",
 					help = "VCF file, possibly gzipped [default: stdin]")
 parser.add_argument("-n","--nsites", type = int,
 					help = "stop after processing this many sites [default: no limit]")
+parser.add_argument("--ref-is-ancestral", action = "store_true",
+					default = False,
+					help = "assume reference allele is the ancestral one, ignoring INFO/AA (USE WITH CAUTION)")
 parser.add_argument("--chunk-size", type = int,
 					default = 2000,
 					help = "when loading genotypes into memory, process this many sites per chunk [default: %(default)d]")
@@ -1560,10 +1432,41 @@ sfs_parser.add_argument("--reads", action = "store_true",
 sfs_parser.add_argument("--calls", action = "store_true",
 					default = False,
 					help = "count hard genotype calls rather than supporting reads [default: %(default)s]")
-sfs_parser.add_argument("--ref-is-ancestral", action = "store_true",
-					default = False,
-					help = "assume reference allele is the ancestral one (FOR TESTING ONLY)")
 sfs_parser.set_defaults(func = calc_sfs, command = "sfs")
+
+## calculate n-dimensional SFS
+f3_parser = subparsers.add_parser("f3stat",
+	description = "Estimate Patterson's f_3 statistic for gene flow f(C;A,B) (from PMC3522152)",
+	parents = [parser])
+f3_parser.add_argument("-p","--pops", type = argparse.FileType("rU"),
+					help = "file of (sample ID, population) tuples [default: all samples as one population]")
+f3_parser.add_argument("--reads", action = "store_true",
+					default = False,
+					help = "count supporting reads (NB: site-wise, not haplotype-aware) [default: %(default)s]")
+f3_parser.add_argument("--calls", action = "store_true",
+					default = False,
+					help = "count hard genotype calls rather than supporting reads [default: %(default)s]")
+f3_parser.add_argument("-j","--jackknife", type = int,
+					default = 1000,
+					help = "estimate standard errors by block jackknife with this block size (number of sites) [default: %(default)d]")
+f3_parser.set_defaults(func = calc_f3, command = "f3stat")
+
+## calculate n-dimensional SFS
+f4_parser = subparsers.add_parser("f4stat",
+	description = "Estimate Patterson's f_4 statistic for gene flow f(W,X;Y,Z) (from PMC3522152)",
+	parents = [parser])
+f4_parser.add_argument("-p","--pops", type = argparse.FileType("rU"),
+					help = "file of (sample ID, population) tuples [default: all samples as one population]")
+f4_parser.add_argument("--reads", action = "store_true",
+					default = False,
+					help = "count supporting reads (NB: site-wise, not haplotype-aware) [default: %(default)s]")
+f4_parser.add_argument("--calls", action = "store_true",
+					default = False,
+					help = "count hard genotype calls rather than supporting reads [default: %(default)s]")
+f4_parser.add_argument("-j","--jackknife", type = int,
+					default = 1000,
+					help = "estimate standard errors by block jackknife with this block size (number of sites) [default: %(default)d]")
+f4_parser.set_defaults(func = calc_f4, command = "f4stat")
 
 ## keep only every nth site
 thin_parser = subparsers.add_parser("thin",
@@ -1605,18 +1508,14 @@ else:
 logging.StreamHandler(stream = sys.stderr)
 logger = logging.getLogger("vcfutils")
 logger.debug("Command-line args, as parsed: {}".format(args))
+logger.info("Task: {}".format(args.command))
 
 ## connect to VCF file
-vcf = VCF(args.infile, gts012 = True)
-nsites = args.nsites if args.nsites else -1
-logger.info("Connecting to VCF file <{}>".format(args.infile))
-
-## add a line to the header documenting what we did
 cmd_line = " ".join(sys.argv[1:])
 pwd = os.path.expandvars(os.getcwd())
-timestamp = dt.now().strftime("%Y-%m-%d %H:%M:%S")
-vcf.add_to_header("##vcfdo_command={}; pwd={}; timestamp={}".format(cmd_line, pwd, timestamp))
+breadcrumb = "vcfdo_command={}; pwd={}".format(cmd_line, pwd)
+vcf = core.VcfIterator(args.infile, nsites = args.nsites, log_name = args.command, breadcrumb = breadcrumb)
+vcf.assume_ref_ancestral = args.ref_is_ancestral
 
-## do the requested thing
-logger.info("Task: {}".format(args.command))
-args.func(vcf = vcf, log = logging.getLogger(args.command), ns = nsites, **vars(args))
+## dispatch
+args.func(vcf = vcf, **vars(args))
