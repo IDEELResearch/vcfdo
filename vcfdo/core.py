@@ -259,9 +259,12 @@ class VcfIterator(VCF):
 				pops[pop].append( self.samples.index(iid) )
 
 		pop_order = sorted(pops, key = lambda k: -1*len(pops[k]))
-		self.log.info("Populations and their sizes:")
-		for pop in pop_order:
-			self.log.info("\t{}: {: >4d}".format(pop, len(pops[pop])))
+		pop_sizes = [ len(pops[_]) for _ in pop_order ]
+		self.log.info("Populations ({}) and their sizes:".format(len(pop_order)))
+		for ii,pop in enumerate(pop_order):
+			self.log.info("\t  {: >4d} {}".format(len(pops[pop]), pop))
+		self.log.info("\t------")
+		self.log.info("\t{: >6d} total samples in {} populations".format(sum(pop_sizes), len(pop_order)))
 		self._pop_order = pop_order
 		self._pops = pops
 		return pop_order, pops
