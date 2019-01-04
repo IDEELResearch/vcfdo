@@ -53,6 +53,7 @@ usage:
 	  --- Admixture
 	      f3stat           calculate Patterson's normalized f_3 statistic
 	      f4stat           calculate Patterson's normalized f_4 statistic, also known as the D-statistic
+	      treemix          make input file for `TreeMix` software
 
 ```
 
