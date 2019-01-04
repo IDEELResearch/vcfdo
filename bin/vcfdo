@@ -1257,6 +1257,66 @@ def calc_f4(vcf, **kwargs):
 
 	vcf.log.info("Done.")
 
+def make_treemix(vcf, **kwargs):
+
+	## load args into a namespace, so I don't have to recode so much stuff
+	args = argparse.Namespace(**kwargs)
+
+	if not (args.reads or args.calls) or (args.reads and args.calls):
+		vcf.log.error("Must specify either `--calls` OR `--reads`, and not both.")
+		sys.exit(1)
+
+	how_count = "READS" if args.reads else "GENOTYPE CALLS"
+	vcf.log.info("Counting alleles at level of {}".format(how_count))
+
+	## read in populations
+	pop_order, pops = vcf.reconcile_populations(args.pops)
+	if len(pop_order) < 3:
+		vcf.log.error("Need >= 3 populations for TreeMix; only {} provided.".format(len(pop_order)))
+		sys.exit(1)
+
+	## loop on sites
+	nkept = 0
+	vcf.add_counter("nused","sites had usable data")
+	vcf.add_standard_counter("multiallelic")
+	vcf.add_standard_counter("nowsaf")
+
+	print(*pop_order, sep = "\t")
+	for site in vcf:
+
+		if site.is_multiallelic or (args.reads and not site.has_wsaf):
+			continue
+
+		nkept += 1
+
+		## calculate allele freqs for each population; will use them repeatedly
+		freqs = []
+		if args.reads:
+			counts = site.get_wsaf()
+		else:
+			counts = site.to_n_alt()
+
+		for pop in pop_order:
+			if args.reads:
+				aaf = np.average(counts[ pops[pop] ])
+				if aaf is np.ma.masked:
+					aaf = 0
+					raf = 0
+				else:
+					raf = 1.0 - aaf
+				freqs.append( (aaf,raf) )
+			else:
+				aaf = np.sum(counts[ pops[pop] ])
+				if aaf is np.ma.masked:
+					aaf = 0
+					raf = 0
+				else:
+					raf = site.ploidy*np.sum(~counts[ pops[pop] ].mask) - aaf
+				#vcf.log.debug(aaf)
+				freqs.append( (int(aaf), int(raf)) )
+
+		print(*[ "{},{}".format(a,b) for a,b in freqs ], sep = "\t")
+
 ## root-level argument parser
 def root_help_message(name = None):
 	return r"""
@@ -1292,6 +1352,7 @@ def root_help_message(name = None):
 	  --- Admixture
 	      f3stat           calculate Patterson's normalized f_3 statistic
 	      f4stat           calculate Patterson's normalized f_4 statistic, also known as the D-statistic
+	      treemix          make input file for `TreeMix` software
 
 	Notes:
 	* All commands that take VCF as input or output work on pipes. For basic filtering operations,
@@ -1515,6 +1576,20 @@ f4_parser.add_argument("-j","--jackknife", type = int,
 					default = 1000,
 					help = "estimate standard errors by block jackknife with this block size (number of sites) [default: %(default)d]")
 f4_parser.set_defaults(func = calc_f4, command = "f4stat")
+
+## make TreeMix input file
+tmx_parser = subparsers.add_parser("treemix",
+	description = "Create input file for `TreeMix` software (cf PMC3499260)",
+	parents = [parser])
+tmx_parser.add_argument("-p","--pops", type = argparse.FileType("rU"),
+					help = "file of (sample ID, population) tuples [default: all samples as one population]")
+tmx_parser.add_argument("--reads", action = "store_true",
+					default = False,
+					help = "count supporting reads (NB: site-wise, not haplotype-aware) [default: %(default)s]")
+tmx_parser.add_argument("--calls", action = "store_true",
+					default = False,
+					help = "count hard genotype calls rather than supporting reads [default: %(default)s]")
+tmx_parser.set_defaults(func = make_treemix, command = "treemix")
 
 ## keep only every nth site
 thin_parser = subparsers.add_parser("thin",
