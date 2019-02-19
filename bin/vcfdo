@@ -882,13 +882,14 @@ def calc_sfs(vcf, **kwargs):
 				else:
 					vcf.counters["nused"].increment()
 				counts = site.get_wsaf()
+				imp_counts, _ = site.get_imputed_wsaf()
 				sampled = np.zeros(len(ssz), dtype = np.int)
 				for jj,pop in enumerate(pop_order):
 					these_counts = counts[ pops[pop] ]
-					if np.all(these_counts.mask):
+					if these_counts.count == 0:
 						## all missing values
 						continue
-					these_counts, _ = site.get_imputed_wsaf()
+					these_counts = imp_counts[ pops[pop] ]
 					if site.alt_is_ancestral:
 						these_counts = 1 - these_counts
 					sampled[jj] = np.sum(np.random.binomial(1, these_counts))
