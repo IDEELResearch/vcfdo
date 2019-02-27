@@ -42,6 +42,7 @@ usage:
 	  --- Allele frequencies
 	      wsaf              calculate within-sample allele frequency (WSAF) and related quantities from read counts
 	      fws               estimate pseudo-inbreeding coefficient F_ws ("within-sample relatedness")
+	      wsafhist          calculate histogram of WSAFs within samples for QC
 	      private           annotate sites where non-ref allele is only found in certain subset of samples
 	      sfs               approximate the n-dimensional unfolded SFS by sampling, possibly in windows
 
