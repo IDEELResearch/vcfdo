@@ -158,6 +158,56 @@ def calc_wsaf(vcf, **kwargs):
 	vcf.show_count_summary()
 
 
+def calc_wsaf_hist(vcf, **kwargs):
+
+	args = argparse.Namespace(**kwargs)
+
+	## set number of bins in histogram
+	nbins = int(1/args.binwidth)+1
+	bins = np.linspace(0,1,nbins)
+	vcf.log.info("Histogram bin width = {}".format(args.binwidth))
+	vcf.log.info("Histogram bin edges = {}".format(bins))
+
+	## initialize histogram
+	counts = np.zeros( (nbins, vcf.nsamples), dtype = np.int )
+
+	## loop on VCF and gather WSAF etc
+	vcf.add_counter("nused","sites had usable data")
+	vcf.add_standard_counter("multiallelic")
+	vcf.add_standard_counter("nowsaf")
+	for site in vcf:
+
+		if site.is_multiallelic or (not site.has_wsaf):
+			continue
+
+		## get (masked) WSAFs and decide which bin they fall on
+		wsaf = site.get_wsaf()
+		wsaf[ wsaf > 0.999999 ] = 0.999999 # hack to handle boundary at WSAF == 1 since bins treated as right-open
+		to_bin = np.digitize(wsaf, bins)
+		#vcf.log.debug(to_bin)
+
+		## add 0 to count for missing WSAF, 1 otherwise
+		flag = (~wsaf.mask).astype(np.int)
+
+		## construct complicated slice-indexer
+		iidx = tuple( range(0, counts.shape[1]) )
+		binidx = tuple( to_bin )
+
+		## increment counts
+		counts[ binidx,iidx ] += flag
+
+		vcf.counters["nused"].increment()
+
+	vcf.show_count_summary()
+
+	vcf.log.info("Printing histograms ...")
+	for ii, iid in enumerate(vcf.samples):
+		for jj in range(0, counts.shape[0]):
+			print(iid, "{:0.03f}".format(bins[jj]), counts[jj,ii], sep = "\t")
+
+	## all done
+	vcf.log.info("Done.\n")
+
 def calc_fws(vcf, **kwargs):
 
 	args = argparse.Namespace(**kwargs)
@@ -1338,6 +1388,7 @@ def root_help_message(name = None):
 	  --- Allele frequencies
 	      wsaf              calculate within-sample allele frequency (WSAF) and related quantities from read counts
 	      fws               estimate pseudo-inbreeding coefficient F_ws ("within-sample relatedness")
+	      wsafhist          calculate histogram of WSAFs within samples for QC
 	      private           annotate sites where non-ref allele is only found in certain subset of samples
 	      sfs               approximate the n-dimensional unfolded SFS by sampling, possibly in windows
 
@@ -1400,6 +1451,15 @@ fws_parser.add_argument("-j","--jackknife", type = int,
 					default = None,
 					help = "estimate standard errors by block jackknife with this block size (number of sites) [default: use asymptotics]")
 fws_parser.set_defaults(func = calc_fws, command = "fws")
+
+## calculate WSAF, PLAF, PLMAF
+wsaf_parser = subparsers.add_parser("wsafhist",
+	description = "Calculate histogram of within-sample allele frequencies (WSAF) in each sample.",
+	parents = [parser])
+wsaf_parser.add_argument("-b","--binwidth", type = float,
+						default = 0.05,
+						help = "width of histogram bins [default: %(default)f]")
+wsaf_parser.set_defaults(func = calc_wsaf_hist, command = "wsafhist")
 
 ## summarise depth per sample per called site
 dp_parser = subparsers.add_parser("depthsummary",
@@ -1537,7 +1597,7 @@ sfs_parser.add_argument("--calls", action = "store_true",
 					help = "count hard genotype calls rather than supporting reads [default: %(default)s]")
 sfs_parser.set_defaults(func = calc_sfs, command = "sfs")
 
-## calculate n-dimensional SFS
+## calculate f3 statistic
 f3_parser = subparsers.add_parser("f3stat",
 	description = "Estimate Patterson's f_3 statistic for gene flow f(C;A,B) (from PMC3522152)",
 	parents = [parser])
@@ -1557,7 +1617,7 @@ f3_parser.add_argument("-j","--jackknife", type = int,
 					help = "estimate standard errors by block jackknife with this block size (number of sites) [default: %(default)d]")
 f3_parser.set_defaults(func = calc_f3, command = "f3stat")
 
-## calculate n-dimensional SFS
+## calculate f4 statistic
 f4_parser = subparsers.add_parser("f4stat",
 	description = "Estimate Patterson's f_4 statistic for gene flow f(W,X;Y,Z) (from PMC3522152)",
 	parents = [parser])
@@ -1597,7 +1657,7 @@ thin_parser.add_argument("-Q", "--every", type = int,
 						help = "emit one site per this many visited [default: %(default)d]")
 thin_parser.set_defaults(func = thin_sites, command = "thin")
 
-## keep only every nth site
+## prune for LD
 prune_parser = subparsers.add_parser("prune",
 	description = "Use greedy window-based method to prune sites in LD",
 	parents = [parser])
