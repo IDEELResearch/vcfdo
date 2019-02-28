@@ -938,10 +938,14 @@ def calc_sfs(vcf, **kwargs):
 					these_counts = counts[ pops[pop] ]
 					if these_counts.count == 0:
 						## all missing values
+						vcf.log.debug("site {}@{}[{}/{}] totally missing".format(site.CHROM, site.POS, site.REF, site.ALT[0]))
 						continue
 					these_counts = imp_counts[ pops[pop] ]
 					if site.alt_is_ancestral:
 						these_counts = 1 - these_counts
+					if np.min(these_counts < 0) or np.max(these_counts > 1):
+						vcf.log.debug("bad imputed WSAFs at {}@{}[{}/{}]: {}".format(site.CHROM, site.POS, site.REF, site.ALT[0], these_counts))
+						continue
 					sampled[jj] = np.sum(np.random.binomial(1, these_counts))
 				sampled = tuple(sampled)
 			else:
