@@ -29,7 +29,7 @@ class SiteCounter:
 
 class VcfIterator(VCF):
 
-	def __init__(self, fname = "/dev/stdin", log = None, nsites = None, log_name = "vcfdo", breadcrumb = None, **kwargs):
+	def __init__(self, fname = "/dev/stdin", threads = None, log = None, nsites = None, log_name = "vcfdo", breadcrumb = None, **kwargs):
 
 		if isinstance(log, logging.Logger):
 			self.log = log
@@ -48,7 +48,7 @@ class VcfIterator(VCF):
 		self._has_standard_counters = False
 
 		self.log.info("Connecting to VCF file <{}>".format(fname))
-		super().__init__(fname, gts012 = True, **kwargs)
+		super().__init__(fname, gts012 = True, threads = threads, **kwargs)
 		self.nsamples = len(self.samples)
 		if breadcrumb is not None:
 			timestamp = dt.now().strftime("%Y-%m-%d %H:%M:%S")

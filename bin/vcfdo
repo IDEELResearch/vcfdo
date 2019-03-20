@@ -911,9 +911,8 @@ def calc_sfs(vcf, **kwargs):
 				ploidy = vcf.ploidy
 				vcf.log.info("Detected ploidy = {} in this VCF".format(ploidy))
 
-			if site.is_multiallelic or (not site.has_ancestral and not args.ref_is_ancestral):
-				continue
-
+			#if site.is_multiallelic or (not site.has_ancestral and not args.ref_is_ancestral):
+			#	continue
 
 			## not biallelic?
 			if len(site.ALT) > 1:
@@ -1053,7 +1052,7 @@ def prune_sites_by_ld(vcf, **kwargs):
 
 		# increase array allocation, if needed
 		if nkept >= geno.shape[0]:
-			vcf.log.debug("Increasing array allocation {} --> {} ... ".format(geno.shape[0], geno.shape[0]+args.chunk_suze))
+			vcf.log.debug("Increasing array allocation {} --> {} ... ".format(geno.shape[0], geno.shape[0]+args.chunk_size))
 			geno = vcf.add_chunk(geno, args.chunk_size)
 
 		if last_chrom and last_chrom != site.CHROM:
@@ -1424,6 +1423,9 @@ parser.add_argument("-i","--infile",
 					help = "VCF file, possibly gzipped [default: stdin]")
 parser.add_argument("-n","--nsites", type = int,
 					help = "stop after processing this many sites [default: no limit]")
+parser.add_argument("-t","--threads", type = int,
+					default = None,
+					help = "number of threads to use for VCF parsing [default: no threading]")
 parser.add_argument("--ref-is-ancestral", action = "store_true",
 					default = False,
 					help = "assume reference allele is the ancestral one, ignoring INFO/AA (USE WITH CAUTION)")
@@ -1698,7 +1700,7 @@ logger.info("Task: {}".format(args.command))
 cmd_line = " ".join(sys.argv[1:])
 pwd = os.path.expandvars(os.getcwd())
 breadcrumb = "vcfdo_command={}; pwd={}".format(cmd_line, pwd)
-vcf = core.VcfIterator(args.infile, nsites = args.nsites, log_name = args.command, breadcrumb = breadcrumb)
+vcf = core.VcfIterator(args.infile, nsites = args.nsites, log_name = args.command, breadcrumb = breadcrumb, threads = args.threads)
 vcf.assume_ref_ancestral = args.ref_is_ancestral
 
 ## dispatch
