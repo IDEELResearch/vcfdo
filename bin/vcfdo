@@ -1073,7 +1073,7 @@ def prune_sites_by_ld(vcf, **kwargs):
 		last_chrom = str(site.CHROM)
 		geno[nkept,:] = site.gt_types/2 * site.ploidy
 		geno[nkept, site.gt_types == 3 ] = np.nan
-		pos.append(str(site))
+		pos.append(site)
 
 	## done with file; flush buffers
 	vcf.log.info("Pruning {} sites on chromosome '{}'".format(nkept, last_chrom))
