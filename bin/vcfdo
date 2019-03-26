@@ -125,6 +125,12 @@ def calc_wsaf(vcf, **kwargs):
 				wsaf[ dp_tot < args.min_depth ] = np.nan
 				wsmaf[ dp_tot < args.min_depth ] = np.nan
 
+			# if requested, mask sites where GQ is below threshold
+			if args.min_GQ:
+				gqs = site.format("GQ")[:,0]
+				wsaf[ gqs < args.min_GQ ] = np.nan
+				wsmaf[ gqs < args.min_GQ ] = np.nan
+
 			# convert to masked array to allow calclation of PLMAF
 			wsaf = np.ma.masked_invalid(wsaf)
 
@@ -1465,6 +1471,9 @@ wsaf_parser = subparsers.add_parser("wsaf",
 wsaf_parser.add_argument("-d","--min-depth", type = int,
 						default = 0,
 						help = "minimum read depth for calculating WSAF [default: %(default)d]")
+wsaf_parser.add_argument("--min-GQ", type = int,
+						default = 0,
+						help = "minimum GQ for calculating WSAF [default: %(default)d]")
 wsaf_parser.add_argument("--ignore-missing", action = "store_true",
 						default = False,
 						help = "don't calculate WSAF when no hard genotype call was made [default: ignore hard calls]")
