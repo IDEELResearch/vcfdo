@@ -114,12 +114,13 @@ def calc_wsaf(vcf, **kwargs):
 			dp_ref_all = np.sum(dp[:,0])
 
 			wsmaf = dp_maj / dp_tot
+			wsaf = dp_alt / (dp_ref + dp_alt)
 			# if requested, mask sites where no genotype call was made (for any reason)
 			if args.ignore_missing:
 				wsaf[ site.gt_types == 3 ] = np.nan
 				wsmaf[ site.gt_types == 3 ] = np.nan
-			
-			wsaf = np.ma.masked_invalid(dp_alt / (dp_ref + dp_alt), )
+
+			wsaf = np.ma.masked_invalid(wsaf)
 
 			## figure out which allele is minor in population
 			## NB: for UNW, record number of reads supporting minor allele -- which may be MORE than major allele,
