@@ -120,6 +120,12 @@ def calc_wsaf(vcf, **kwargs):
 				wsaf[ site.gt_types == 3 ] = np.nan
 				wsmaf[ site.gt_types == 3 ] = np.nan
 
+			# if requested, mask sites where depth is below threshold
+			if args.min_depth > 0:
+				wsaf[ dp_tot < args.min_depth ] = np.nan
+				wsmaf[ dp_tot < args.min_depth ] = np.nan
+
+			# convert to masked array to allow calclation of PLMAF
 			wsaf = np.ma.masked_invalid(wsaf)
 
 			## figure out which allele is minor in population
@@ -1456,6 +1462,9 @@ parser.add_argument("-v","--verbose", action = "store_true",
 wsaf_parser = subparsers.add_parser("wsaf",
 	description = "Calculate within-sample allele frequencies (WSAF) from read counts, and their population-level equivalents.",
 	parents = [parser])
+wsaf_parser.add_argument("-d","--min-depth", type = int,
+						default = 0,
+						help = "minimum read depth for calculating WSAF [default: %(default)d]")
 wsaf_parser.add_argument("--ignore-missing", action = "store_true",
 						default = False,
 						help = "don't calculate WSAF when no hard genotype call was made [default: ignore hard calls]")
