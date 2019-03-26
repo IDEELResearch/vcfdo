@@ -116,6 +116,11 @@ def calc_wsaf(vcf, **kwargs):
 			wsmaf = dp_maj / dp_tot
 			wsaf = np.ma.masked_invalid(dp_alt / (dp_ref + dp_alt), )
 
+			# if requested, mask sites where no genotype call was made (for any reason)
+			if args.ignore_missing:
+				wsaf[ site.gt_types == 3 ] = np.nan
+				wsmaf[ site.gt_types == 3 ] = np.nan
+
 			## figure out which allele is minor in population
 			## NB: for UNW, record number of reads supporting minor allele -- which may be MORE than major allele,
 			##  depending on distribution per-sample coverage. But we want evidence of favor of rarest allele.
@@ -295,11 +300,17 @@ def pca_wsaf(vcf, **kwargs):
 	W = vcf.add_chunk(None, args.chunk_size, nsamples = len(sample_idx))
 	vcf.log.info("Reading genotype data in chunks of size {} ...".format(args.chunk_size))
 	vcf.add_standard_counter("multiallelic")
+	vcf.add_counter("nmissing","sites with WSAF missingness > {}".format(args.max_missing))
 	vcf.add_counter("nrare","sites with PLMAF < {}".format(args.min_plmaf))
 	nkept = 0
 	for site in vcf:
 
 		if site.is_multiallelic:
+			continue
+
+		w_unmasked = site.get_wsaf(sample_idx)
+		if np.sum(w_unmasked.mask)/len(sample_idx) > args.max_missing:
+			vcf.counters["nmissing"].increment()
 			continue
 
 		plmaf = site.recalc_plmaf(sample_idx)
@@ -1444,6 +1455,9 @@ parser.add_argument("-v","--verbose", action = "store_true",
 wsaf_parser = subparsers.add_parser("wsaf",
 	description = "Calculate within-sample allele frequencies (WSAF) from read counts, and their population-level equivalents.",
 	parents = [parser])
+wsaf_parser.add_argument("--ignore-missing", action = "store_true",
+						default = False,
+						help = "don't calculate WSAF when no hard genotype call was made [default: ignore hard calls]")
 wsaf_parser.add_argument("--set-filter", type = float,
 						default = None,
 						help = "apply genotype-level filter for samples with WSAF outside specified bounds [default: don't do this]")
@@ -1507,6 +1521,9 @@ pca_parser.add_argument("-S","--samples-file", type = argparse.FileType("rU"),
 pca_parser.add_argument("-f","--min-plmaf", type = float,
 					default = 0.0,
 					help = "limit to sites with PMLAF > {min_plmaf} [default: %(default)f]")
+pca_parser.add_argument("-m","--max-missing", type = float,
+					default = 1.0,
+					help = "limit to sites with less than this proportion missing WSAF [default: %(default)f]")
 pca_parser.add_argument("-K","--ncomponents", type = int,
 					default = 10,
 					help = "calculate the first K PCs if using randomized SVD algorithm [default: %(default)d]")
