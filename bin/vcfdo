@@ -340,6 +340,8 @@ def pca_wsaf(vcf, **kwargs):
 		w, plaf = site.get_imputed_wsaf(sample_idx)
 		W[ nkept,: ] = w
 
+	vcf.show_count_summary()
+
 	## remove low-variance sites that make bad things happen in SVD
 	W = W[:nkept,:]
 	sigma = np.var(W, 1)
