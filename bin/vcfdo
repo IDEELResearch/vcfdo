@@ -363,6 +363,10 @@ def pca_wsaf(vcf, **kwargs):
 	with open(args.out + ".pca.ev", "w") as evs_file:
 		print("\n".join([ str(_) for _ in model.explained_variance_ratio_ ]), file = evs_file)
 
+	## write loadings, if requested
+	#if args.write_loadings:
+
+
 	## all done
 	vcf.log.info("Done.\n")
 
@@ -508,19 +512,20 @@ def summarise_dp(vcf, **kwargs):
 	vcf.log.info("Processing VCF file ...")
 	for site in vcf:
 
-		if ii >= sample_dp.shape[0]:
+		if vcf.ii >= sample_dp.shape[0]:
 			vcf.log.debug("Increasing array allocation ... ")
 			sample_dp = vcf.add_chunk(sample_dp, args.chunk_size)
 
 		this_dp = site.format("DP").T[0:]
 		this_dp[ this_dp < 0 ] = 0
-		sample_dp[ii,:] = this_dp
+		sample_dp[vcf.ii,:] = this_dp
 
-	mu = np.mean(sample_dp[:ii,:], 0)
-	sigma = np.std(sample_dp[:ii,:], 0)
-	med = np.percentile(sample_dp[:ii,:], 50, 0)
+	mu = np.mean(sample_dp[:vcf.ii,:], 0)
+	sigma = np.std(sample_dp[:vcf.ii,:], 0)
+	med = np.percentile(sample_dp[:vcf.ii,:], 50, 0)
+	hi = np.percentile(sample_dp[:vcf.ii,:], 99, 0)
 
-	for iid, _mu, _med, _sigma in zip(vcf.samples, mu, med, sigma):
+	for iid, _mu, _med, _sigma in zip(vcf.samples, mu, med, sigma, hi):
 		print(iid, "{:.1f}".format(_mu), "{:.1f}".format(_med), "{:.3f}".format(_sigma), sep = "\t")
 
 	vcf.show_count_summary()
@@ -1470,7 +1475,8 @@ parser.add_argument("-v","--verbose", action = "store_true",
 wsaf_parser = subparsers.add_parser("wsaf",
 	description = "Calculate within-sample allele frequencies (WSAF) from read counts, and their population-level equivalents.",
 	parents = [parser])
-wsaf_parser.add_argument("-d","--min-depth", type = int,
+wsaf_parser.add_argument("-d","--min-depth","--min-DP", type = int,
+						dest = "min_depth",
 						default = 0,
 						help = "minimum read depth for calculating WSAF [default: %(default)d]")
 wsaf_parser.add_argument("--min-GQ", type = int,
