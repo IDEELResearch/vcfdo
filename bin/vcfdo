@@ -525,8 +525,8 @@ def summarise_dp(vcf, **kwargs):
 	med = np.percentile(sample_dp[:vcf.ii,:], 50, 0)
 	hi = np.percentile(sample_dp[:vcf.ii,:], 99, 0)
 
-	for iid, _mu, _med, _sigma in zip(vcf.samples, mu, med, sigma, hi):
-		print(iid, "{:.1f}".format(_mu), "{:.1f}".format(_med), "{:.3f}".format(_sigma), sep = "\t")
+	for iid, _mu, _med, _sigma, _hi in zip(vcf.samples, mu, med, sigma, hi):
+		print(iid, "{:.1f}".format(_mu), "{:.1f}".format(_med), "{:.3f}".format(_sigma), "{:.1f}".format(_hi), sep = "\t")
 
 	vcf.show_count_summary()
 
