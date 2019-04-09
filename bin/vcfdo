@@ -957,7 +957,7 @@ def calc_sfs(vcf, **kwargs):
 
 			if args.reads:
 				if not site.has_format("WSAF"):
-					vcf.counters["nnodp"].increment()
+					vcf.counters["nowsaf"].increment()
 					continue
 				else:
 					vcf.counters["nused"].increment()
