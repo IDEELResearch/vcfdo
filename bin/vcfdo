@@ -22,6 +22,7 @@ from cyvcf2 import VCF
 from allel import pca, randomized_pca, pairwise_distance, locate_unlinked
 #from allel.stats import rogers_huff_r
 from scipy.spatial.distance import squareform
+from scipy.optimize import minimize as minimize_fn, minimize_scalar
 from pyfaidx import Fasta
 
 from vcfdo import core
@@ -388,23 +389,32 @@ def calc_weighted_dist(vcf, **kwargs):
 
 		## get WSAFs from FORMAT field
 		this_wsaf = site.get_wsaf()
-		wsaf[ vcf.ii,: ] = this_wsaf
+		wsaf[ vcf.ii-1,: ] = this_wsaf
 
 		## impute PLAF for missing values
 		w, plaf = site.get_imputed_wsaf()
-		wsaf_imputed[ vcf.ii,: ] = w
+		wsaf_imputed[ vcf.ii-1,: ] = w
 
 	vcf.show_count_summary()
 
 	wsaf = wsaf[ :vcf.ii, : ]
 	wsaf_imputed = wsaf_imputed[ :vcf.ii, : ]
 	vcf.log.info("Dimensions of full genotype matrix: {}".format(wsaf.shape))
-	vcf.log.info("Calculating weighting factors following Amato et al (PMC4786412) ...")
-	r_sq = np.corrcoef(wsaf_imputed) ** 2
-	r_sq[ np.isnan(r_sq) ] = 0
-	r_sq -= np.eye(r_sq.shape[0])
-	r_sq[ r_sq < kwargs["rsq_cutoff"] ] = 0
-	w_i = 1 / (1 + np.sum(r_sq, 1))
+
+	if not args.unweighted:
+		vcf.log.info("Calculating weighting factors following Amato et al (PMC4786412) ...")
+		r_sq = np.corrcoef(wsaf_imputed) ** 2
+		vcf.log.debug("r_sq {}".format(r_sq.shape))
+		r_sq[ np.isnan(r_sq) ] = 0
+		r_sq -= np.eye(r_sq.shape[0])
+		r_sq[ r_sq < kwargs["rsq_cutoff"] ] = 0
+		w_i = 1 / (1 + np.sum(r_sq, 1))
+		vcf.log.debug("r_sq = {}".format(np.round(100*r_sq)))
+		vcf.log.debug("w_i = {}".format(w_i.T))
+		vcf.log.debug("variant weights in range [{}, {}]".format(np.min(w_i), np.max(w_i)))
+	else:
+		vcf.log.info("Calculating unweighted distance, ie. ignoring effects of LD between sites ...")
+		w_i = np.ones(wsaf_imputed.shape[0])
 
 	vcf.log.info("Calculating pairwise distances using WSAFs ...")
 	combos = list( it.combinations(range(0, len(vcf.samples)), 2) )
@@ -416,15 +426,114 @@ def calc_weighted_dist(vcf, **kwargs):
 		ii += 1
 		fa = np.ma.masked_values(wsaf[:,sa], -1)
 		fb = np.ma.masked_values(wsaf[:,sb], -1)
-		d_i = (fa*(1-fb) + (1-fa)*fb)*w_i
+		d_u = (fa*(1-fb) + (1-fa)*fb)
+		d_i = d_u*w_i
 		d = np.average(d_i)
+		du = np.average(d_u)
 		#D[ sa,sb ] = np.average(d*w_i)
 		nz = np.sum(~d_i.mask)
 		if not ii % 100:
 			vcf.log.info("\t... {} pairs done ...".format(ii))
-		print(vcf.samples[sa], vcf.samples[sb], nz, formatter.format(d), sep = "\t")
+		print(vcf.samples[sa], vcf.samples[sb], nz, formatter.format(d), formatter.format(du), sep = "\t")
 
 	vcf.log.info("Done.\n")
+
+
+def calc_malecot_ibd(vcf, **kwargs):
+
+	args = argparse.Namespace(**kwargs)
+
+	wsaf = vcf.add_chunk(None, args.chunk_size)
+	wsaf_imputed = vcf.add_chunk(None, args.chunk_size)
+	plafs = vcf.add_chunk(None, args.chunk_size, nsamples = 1)
+
+	## loop on VCF and add take sample depths
+	vcf.log.info("Reading genotype data in chunks of size {} ...".format(args.chunk_size))
+	vcf.log.debug("PLAF shape = {}, geno shape = {}".format(plafs.shape, wsaf.shape))
+	for site in vcf:
+
+		if vcf.ii >= wsaf.shape[0]:
+			vcf.log.debug("Increasing array allocation ... ")
+			wsaf = vcf.add_chunk(wsaf, args.chunk_size)
+			wsaf_imputed = vcf.add_chunk(wsaf_imputed, args.chunk_size)
+			plafs = vcf.add_chunk(plafs, args.chunk_size)
+
+		## get WSAFs from FORMAT field
+		this_wsaf = site.get_wsaf()
+		wsaf[ vcf.ii-1,: ] = this_wsaf
+
+		## impute PLAF for missing values
+		w, plaf = site.get_imputed_wsaf()
+		#vcf.log.debug("ii={} {}@{} INFO/PLAF={}, calc PLAF={}".format(vcf.ii-1, site.CHROM, site.POS, site.INFO["PLAF"], plaf))
+		plafs[ vcf.ii-1,0 ] = plaf
+		wsaf_imputed[ vcf.ii-1,: ] = w
+
+	vcf.show_count_summary()
+
+	## trim off unused allocation
+	wsaf = wsaf[ :vcf.ii, : ]
+	wsaf_imputed = wsaf_imputed[ :vcf.ii, : ]
+	plafs = plafs[ :vcf.ii, 0 ]
+
+	vcf.log.info("Dimensions of full genotype matrix: {}".format(wsaf.shape))
+	vcf.log.info("Dimensions of PLAFs matrix: {}".format(plafs.shape))
+	vcf.log.info("Estimating pairwise IBD using WSAFs ...")
+	combos = list( it.combinations(range(0, len(vcf.samples)), 2) )
+	vcf.log.info("\t[{} combinations]".format(len(combos)))
+	formatter = "{:0." + str(args.digits) + "f}"
+	#D = np.zeros( (len(vcf.samples), len(vcf.samples)), dtype = np.float )
+	ii = 0
+
+	def ibd_negloglik(f, wa, wb, plaf):
+		"""
+		Log-likelihood for Malecot (1970) definition of IBD
+		Let plaf = population allele freq, f = inbreeding coefficient.
+		There are four cases (haplotypes match or don't match for major or minor allele).
+		At each locus, we weight each of these according to WSAFs (wa, wb).
+		Then take Log-likelihood across all sites.
+		"""
+
+		## four cases at each locus (corresponding to four cells in Punnet-like square)
+		c1 = f*plaf + (1-f)*(plaf**2)
+		c2 = (1-f)*plaf*(1-plaf)
+		c3 = c2
+		c4 = f*(1-plaf) + (1-f)*((1-plaf)**2)
+
+		## define these for notational convenience
+		pa = wa
+		qa = 1-wa
+		pb = wb
+		qb = 1-wb
+
+		## likelihood is weighted sum of these cases; here we do some logging and unlogging for underflow protection
+		# lik =	np.exp(np.log(pa) + np.log(pb) + np.log(c1)) + \
+		# 		np.exp(np.log(pa) + np.log(qb) + np.log(c2)) + \
+		# 		np.exp(np.log(qa) + np.log(pb) + np.log(c3)) + \
+		# 		np.exp(np.log(qa) + np.log(qb) + np.log(c4))
+		lik =	pa*pb*c1 + \
+				pa*qb*c2 + \
+				qa*pb*c3 + \
+				qa*qb*c4
+		return -1*np.sum(np.log(lik))
+
+	for sa,sb in combos:
+		ii += 1
+		wa = np.ma.masked_values(wsaf[:,sa], -1)
+		wb = np.ma.masked_values(wsaf[:,sb], -1)
+		keepers = np.logical_and(~wa.mask, ~wb.mask)
+		nz = np.sum(keepers)
+		#rez = minimize_fn(ibd_negloglik, 0.1, (wa,wb,plafs), bounds = [ (0,1) ], method = "Nelder-Mead")
+		rez = minimize_scalar(ibd_negloglik, bounds = (0.001,0.999), args = (wa[keepers],wb[keepers],plafs[keepers]), method = "Bounded")
+		if rez.success:
+			fhat = rez.x
+		else:
+			fhat = np.nan
+		if not ii % 100:
+			vcf.log.info("\t... {} pairs done ...".format(ii))
+		print(vcf.samples[sa], vcf.samples[sb], nz, formatter.format(fhat), sep = "\t")
+
+	vcf.log.info("Done.\n")
+
 
 def calc_ibs_dist(vcf, **kwargs):
 
@@ -440,6 +549,7 @@ def calc_ibs_dist(vcf, **kwargs):
 	for site in vcf:
 
 		this_geno = site.to_n_alt()/site.ploidy
+		#vcf.log.debug("{}@{} ploidy = {}".format(site.CHROM, site.POS, site.ploidy))
 		ac = np.sum(this_geno)
 		an = np.sum(~this_geno.mask)
 		if ac == an or ac == 0:
@@ -470,6 +580,7 @@ def calc_ibs_dist(vcf, **kwargs):
 
 	formatter = "{:0." + str(args.digits) + "f}"
 	vcf.log.info("Calculating pairwise distances ...")
+	#vcf.log.info("[ Assuming ploidy = {} for Hamming distances ... ]".format(vcf.ploidy))
 	if args.flatten:
 		D = np.eye(vcf.nsamples)
 		nz = np.zeros( (vcf.nsamples,vcf.nsamples), dtype = np.int)
@@ -488,6 +599,7 @@ def calc_ibs_dist(vcf, **kwargs):
 			D[sb,sa] = d
 			nz[sa,sb] = np.sum(np.logical_and(~fa.mask, ~fb.mask))
 			nz[sb,sa] = nz[sa,sb]
+			print(vcf.samples[sa], vcf.samples[sb], nz[sa,sb], formatter.format(d), sep = "\t")
 			if not ii % 100:
 				vcf.log.info("\t... {} pairs done ...".format(ii))
 
@@ -518,7 +630,7 @@ def summarise_dp(vcf, **kwargs):
 
 		this_dp = site.format("DP").T[0:]
 		this_dp[ this_dp < 0 ] = 0
-		sample_dp[vcf.ii,:] = this_dp
+		sample_dp[vcf.ii-1,:] = this_dp
 
 	mu = np.mean(sample_dp[:vcf.ii,:], 0)
 	sigma = np.std(sample_dp[:vcf.ii,:], 0)
@@ -1427,8 +1539,9 @@ def root_help_message(name = None):
 	      sfs               approximate the n-dimensional unfolded SFS by sampling, possibly in windows
 
 	  --- Relatedness/ordination
-	      dist              calculate LD-weighted pairwise distances from within-sample allele frequencies
+	      dist              calculate LD-weighted pairwise distances from WSAFs
 	      ibs               calculate simple identity-by-state (IBS) matrix from hard calls at polymorphic sites only
+	      ibd               calculate identity-by-descent (IBD) matrix from WSAFs and Malecot's (1970) definition of IBD
 	      pca               perform PCA using within-sample allele frequencies instead of hard calls
 
 	  --- Admixture
@@ -1568,6 +1681,8 @@ dist_parser.add_argument("-d","--digits", type = int,
 dist_parser.add_argument("-r","--rsq-cutoff", type = float,
 					default = 0.10,
 					help = "ignore site pairs with r^2 < cutoff when assigning weights [default: %(default)f]")
+dist_parser.add_argument("-u","--unweighted", action = "store_true",
+					help = "calculated distance from WSAFs but ignore LD")
 dist_parser.set_defaults(func = calc_weighted_dist, command = "dist")
 
 ## quick identity-by-state on hard genotypes
@@ -1580,6 +1695,15 @@ ibs_parser.add_argument("-d","--digits", type = int,
 ibs_parser.add_argument("--flatten", action = "store_true",
 					help = "report one pair of individuals per line, rather than square matrix")
 ibs_parser.set_defaults(func = calc_ibs_dist, command = "ibs")
+
+## quick identity-by-state on hard genotypes
+ibs_parser = subparsers.add_parser("ibd",
+	description = "Calculate identity-by-descent (IBD) matrix from WSAFs. Assumes Malecot (1970) definition of IBD and ideas from Bob Verity.",
+	parents = [parser])
+ibs_parser.add_argument("-d","--digits", type = int,
+					default = 3,
+					help = "report IBS to this many decimal places [default: %(default)d]")
+ibs_parser.set_defaults(func = calc_malecot_ibd, command = "ibd")
 
 ## polarize alleles using ancestral/outgroup genome in fasta format
 anc_parser = subparsers.add_parser("polarize",

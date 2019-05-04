@@ -21,40 +21,41 @@ Utilities in `vcfdo` are compartmentalized into sub-commands in the style of `sa
 
 ```
 usage:
-	vcfdo <command> [options]
+vcfdo <command> [options]
 
-	Commands:
+Commands:
 
-	  --- Basic statistics
-	      missing           rates of missing calls by site or by sample
-	      depthsummary      quantiles of read depth (at called sites) per sample
-	      filtersummary     tallies of filter status by site or by sample
+  --- Basic statistics
+	  missing           rates of missing calls by site or by sample
+	  depthsummary      quantiles of read depth (at called sites) per sample
+	  filtersummary     tallies of filter status by site or by sample
 
-	  --- Downsampling
-	      thin              just emit every nth site
-	      prune             greedy LD-pruning in sliding windows
+  --- Downsampling
+	  thin              just emit every nth site
+	  prune             greedy LD-pruning in sliding windows
 
-	  --- Ancestral alleles
-	      polarize          define ancestral alleles based on outgroup sequence
-	      titv              annotate sites as transitions or transversions; flag gBGC candidates
-	      derived           count derived alleles per sample, using either read counts or hard calls
+  --- Ancestral alleles
+	  polarize          define ancestral alleles based on outgroup sequence
+	  titv              annotate sites as transitions or transversions; flag gBGC candidates
+	  derived           count derived alleles per sample, using either read counts or hard calls
 
-	  --- Allele frequencies
-	      wsaf              calculate within-sample allele frequency (WSAF) and related quantities from read counts
-	      fws               estimate pseudo-inbreeding coefficient F_ws ("within-sample relatedness")
-	      wsafhist          calculate histogram of WSAFs within samples for QC
-	      private           annotate sites where non-ref allele is only found in certain subset of samples
-	      sfs               approximate the n-dimensional unfolded SFS by sampling, possibly in windows
+  --- Allele frequencies
+	  wsaf              calculate within-sample allele frequency (WSAF) and related quantities from read counts
+	  fws               estimate pseudo-inbreeding coefficient F_ws ("within-sample relatedness")
+	  wsafhist          calculate histogram of WSAFs within samples for QC
+	  private           annotate sites where non-ref allele is only found in certain subset of samples
+	  sfs               approximate the n-dimensional unfolded SFS by sampling, possibly in windows
 
-	  --- Relatedness/ordination
-	      dist              calculate LD-weighted pairwise distances from within-sample allele frequencies
-	      ibs               calculate simple identity-by-state (IBS) matrix from hard calls at polymorphic sites only
-	      pca               perform PCA using within-sample allele frequencies instead of hard calls
+  --- Relatedness/ordination
+	  dist              calculate LD-weighted pairwise distances from WSAFs
+	  ibs               calculate simple identity-by-state (IBS) matrix from hard calls at polymorphic sites only
+	  ibd               calculate identity-by-descent (IBD) matrix from WSAFs and Malecot's (1970) definition of IBD
+	  pca               perform PCA using within-sample allele frequencies instead of hard calls
 
-	  --- Admixture
-	      f3stat            calculate Patterson's normalized f_3 statistic
-	      f4stat            calculate Patterson's normalized f_4 statistic, also known as the D-statistic
-	      treemix           make input file for `TreeMix` software
+  --- Admixture
+	  f3stat            calculate Patterson's normalized f_3 statistic
+	  f4stat            calculate Patterson's normalized f_4 statistic, also known as the D-statistic
+	  treemix           make input file for `TreeMix` software
 
 ```
 
@@ -131,6 +132,7 @@ The design of `vcfdo` is modular: multiple tools may need to be strung together 
 | `fws` | `FORMAT/WSAF` | none | `INFO/PLMAF`
 | `pca` | `FORMAT/WSAF` | none | `INFO/PLMAF`
 | `dist` | `FORMAT/WSAF` | none | none
+| `ibd` | `FORMAT/WSAF` | none | `INFO/PLMAF`
 | `ibs` | none | none | none
 | `polarize` | none | `INFO/AA` | none
 | `titv` | `INFO/AA` | `INFO/Transversion`, `INFO/StrongWeak`, `INFO/BGC` | none
