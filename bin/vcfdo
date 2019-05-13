@@ -308,8 +308,27 @@ def pca_wsaf(vcf, **kwargs):
 	## load args into a namespace, so I don't have to recode so much stuff
 	args = argparse.Namespace(**kwargs)
 
+	## decide which samples to keep
 	keep_samples = vcf.reconcile_samples(args.samples, args.samples_file, allow_all = True)
 	sample_idx = [ vcf.samples.index(_) for _ in keep_samples ]
+
+	## are we projecting some samples onto others?
+	if args.project is not None:
+		target_samples = vcf.reconcile_samples([], args.project, allow_all = True)
+		target_idx = [ vcf.samples.index(_) for _ in target_samples ]
+		query_samples = set(keep_samples) - set(target_samples)
+		query_idx = [ vcf.samples.index(_) for _ in query_samples ]
+		sample_idx = query_idx + target_idx
+		if not len(target_idx):
+			raise ValueError("Must provide valid set of 'target' samples to define PC space.")
+		elif not len(query_idx):
+			# bail out and just do PCA as normal
+			vcf.log.warning("No valid query sampels provided; proceeding with usual one-pass PCA.")
+			args.project = None
+		else:
+			vcf.log.info("Preparing to do two-pass PCA with {} target and {} query samples ...".format(len(target_idx), len(query_idx)))
+	else:
+		vcf.log.info("Preparing to do one-pass PCA on {} samples ..".format(len(sample_idx)))
 
 	W = vcf.add_chunk(None, args.chunk_size, nsamples = len(sample_idx))
 	vcf.log.info("Reading genotype data in chunks of size {} ...".format(args.chunk_size))
@@ -345,28 +364,42 @@ def pca_wsaf(vcf, **kwargs):
 
 	## remove low-variance sites that make bad things happen in SVD
 	W = W[:nkept,:]
-	sigma = np.var(W, 1)
+	if args.project is not None:
+		# when projecting, the 'target' samples define PC space, so calculate row variance only in that subset
+		w_target_cols = list(range(0, len(target_idx)))
+		w_query_cols = [ len(query_idx) + _ for _ in range(0, len(query_idx)) ]
+		sigma = np.var(W[ :,w_target_cols ], 1)
+	else:
+		sigma = np.var(W, 1)
 	W = W[ (sigma > 1.0e-6),:]
 	vcf.log.info("Loaded genotypes at {} biallelic sites with PLMAF >= {}".format(nkept, args.min_plmaf))
 	vcf.log.info("Retained {} sites with non-negligible variance for PCA.".format(W.shape[0]))
 
 	## do the PCA using scikit-allel tools
-	vcf.log.info("Performing PCA ...")
-	pca_fn = pca if not args.randomized else randomized_pca
-	coords, model = pca_fn(W, n_components = args.ncomponents, scaler = "patterson")
-	vcf.log.info("Done with PCA.")
+	## are we projecting some samples onto others?
+	if args.project is not None:
+		vcf.log.info("Performing PCA with target samples to define PC space ...")
+		pca_fn = pca if not args.randomized else randomized_pca
+		_, model = pca_fn(W[ :,w_target_cols ], n_components = args.ncomponents, scaler = "patterson")
+		vcf.log.info("Done; now projecting remaining samples onto those PCs ...")
+		proj_coords = model.transform(W)
+		vcf.log.info("Done with projection.")
+	else:
+		vcf.log.info("Performing PCA  ...")
+		pca_fn = pca if not args.randomized else randomized_pca
+		proj_coords, model = pca_fn(W, n_components = args.ncomponents, scaler = "patterson")
+		vcf.log.info("Done with PCA.")
 
 	## write rotations and normalized eigenvalues
 	vcf.log.info("Writing results to <{0}.pca> and <{0}.pca.ev> (sample coordinates and variance explained, respectively.)".format(args.out))
 	with open(args.out + ".pca", "w") as pcs_file:
-		for ii in range(0, coords.shape[0]):
-			print(vcf.samples[ii], *coords[ii,:], sep = "\t", file = pcs_file)
+		for ii in range(0, proj_coords.shape[0]):
+			print(vcf.samples[ sample_idx[ii] ], *proj_coords[ii,:], sep = "\t", file = pcs_file)
 	with open(args.out + ".pca.ev", "w") as evs_file:
 		print("\n".join([ str(_) for _ in model.explained_variance_ratio_ ]), file = evs_file)
 
 	## write loadings, if requested
 	#if args.write_loadings:
-
 
 	## all done
 	vcf.log.info("Done.\n")
@@ -477,17 +510,23 @@ def calc_malecot_ibd(vcf, **kwargs):
 
 	vcf.log.info("Dimensions of full genotype matrix: {}".format(wsaf.shape))
 	vcf.log.info("Dimensions of PLAFs matrix: {}".format(plafs.shape))
-	vcf.log.info("Estimating pairwise IBD using WSAFs ...")
-	combos = list( it.combinations(range(0, len(vcf.samples)), 2) )
+
+	if args.self_only:
+		vcf.log.info("Estimating individual inbreeding coefficients using WSAFs ...")
+		combos = [ (_,_) for _ in range(0, len(vcf.samples)) ]
+	else:
+		vcf.log.info("Estimating pairwise IBD using WSAFs ...")
+		combos = list( it.combinations(range(0, len(vcf.samples)), 2) )
 	vcf.log.info("\t[{} combinations]".format(len(combos)))
+	vcf.log.info("eps = {}, maxiter = {}".format(args.tol, args.max_iter))
 	formatter = "{:0." + str(args.digits) + "f}"
 	#D = np.zeros( (len(vcf.samples), len(vcf.samples)), dtype = np.float )
 	ii = 0
 
-	def ibd_negloglik(f, wa, wb, plaf):
+	def ibd_negloglik(f, wa, wb, plaf, inbreeding = True):
 		"""
 		Log-likelihood for Malecot (1970) definition of IBD
-		Let plaf = population allele freq, f = inbreeding coefficient.
+		Let plaf = population allele freq (non-ref allele), f = inbreeding coefficient.
 		There are four cases (haplotypes match or don't match for major or minor allele).
 		At each locus, we weight each of these according to WSAFs (wa, wb).
 		Then take Log-likelihood across all sites.
@@ -506,24 +545,36 @@ def calc_malecot_ibd(vcf, **kwargs):
 		qb = 1-wb
 
 		## likelihood is weighted sum of these cases; here we do some logging and unlogging for underflow protection
-		# lik =	np.exp(np.log(pa) + np.log(pb) + np.log(c1)) + \
-		# 		np.exp(np.log(pa) + np.log(qb) + np.log(c2)) + \
-		# 		np.exp(np.log(qa) + np.log(pb) + np.log(c3)) + \
-		# 		np.exp(np.log(qa) + np.log(qb) + np.log(c4))
-		lik =	pa*pb*c1 + \
-				pa*qb*c2 + \
-				qa*pb*c3 + \
-				qa*qb*c4
-		return -1*np.sum(np.log(lik))
+		if not inbreeding:
+			lik =	pa*pb*c1 + \
+					pa*qb*c2 + \
+					qa*pb*c3 + \
+					qa*qb*c4
+		else:
+			lik =	(pa == 1.0)*c1 + \
+					(pa == 0.5)*c2 + \
+					(pa == 0.5)*c3 + \
+					(pa == 0.0)*c4
+		loglik = -1*np.sum(np.log(lik))
+		return loglik
 
 	for sa,sb in combos:
 		ii += 1
 		wa = np.ma.masked_values(wsaf[:,sa], -1)
 		wb = np.ma.masked_values(wsaf[:,sb], -1)
-		keepers = np.logical_and(~wa.mask, ~wb.mask)
+		keepers = np.logical_and(~np.ma.getmaskarray(wa), ~np.ma.getmaskarray(wb))
 		nz = np.sum(keepers)
 		#rez = minimize_fn(ibd_negloglik, 0.1, (wa,wb,plafs), bounds = [ (0,1) ], method = "Nelder-Mead")
-		rez = minimize_scalar(ibd_negloglik, bounds = (0.001,0.999), args = (wa[keepers],wb[keepers],plafs[keepers]), method = "Bounded")
+		if sa == sb:
+			eps = args.wsaf_threshold
+			wa[ np.logical_and(wa > eps, wa < 1-eps) ] = 0.5
+			wa[ wa <= eps ] = 0.0
+			wa[ wa >= 1-eps ] = 1.0
+			wb = wa
+			vcf.log.debug("{} 0,1,2 = ({})".format(vcf.samples[sa], (np.sum(wa == 0.0), np.sum(wa == 0.5), np.sum(wa == 1.0))))
+		rez = minimize_scalar(ibd_negloglik, bounds = (0.001,0.999), \
+							args = (wa[keepers],wb[keepers],plafs[keepers], args.self_only), \
+							method = "Bounded", options = { "maxiter": args.max_iter, "xatol": args.tol })
 		if rez.success:
 			fhat = rez.x
 		else:
@@ -1658,6 +1709,8 @@ pca_parser.add_argument("-s","--samples", nargs = "+",
 					help = "restrict analysis to these samples, whitespace-separated [default: use all samples]")
 pca_parser.add_argument("-S","--samples-file", type = argparse.FileType("rU"),
 					help = "restrict analysis to samples in this file, one per line [default: use all samples]")
+pca_parser.add_argument("--project", type = argparse.FileType("rU"),
+					help = "calculate PCs on samples in this file, then project remaining samples onto that space [default: one-pass PCA on all samples]")
 pca_parser.add_argument("-f","--min-plmaf", type = float,
 					default = 0.0,
 					help = "limit to sites with PMLAF > {min_plmaf} [default: %(default)f]")
@@ -1697,13 +1750,24 @@ ibs_parser.add_argument("--flatten", action = "store_true",
 ibs_parser.set_defaults(func = calc_ibs_dist, command = "ibs")
 
 ## quick identity-by-state on hard genotypes
-ibs_parser = subparsers.add_parser("ibd",
+ibd_parser = subparsers.add_parser("ibd",
 	description = "Calculate identity-by-descent (IBD) matrix from WSAFs. Assumes Malecot (1970) definition of IBD and ideas from Bob Verity.",
 	parents = [parser])
-ibs_parser.add_argument("-d","--digits", type = int,
+ibd_parser.add_argument("--self-only", action = "store_true",
+					help = "estimate within-sample IBD (ie. inbreeding coefficients) instead of pairwise")
+ibd_parser.add_argument("-w","--wsaf-threshold", type = float,
+					default = 0.01,
+					help = "minimum WSAF to consider evidence for >1 allele when `--self-only` [default: %(default)f]")
+ibd_parser.add_argument("--tol", type = float,
+					default = 1e-4,
+					help = "error tolerance for estimation of IBD coefficients [default: %(default)f]")
+ibd_parser.add_argument("--max-iter", type = int,
+					default = 250,
+					help = "maximum number of iterations for numerical optimization [default: %(default)d]")
+ibd_parser.add_argument("-d","--digits", type = int,
 					default = 3,
 					help = "report IBS to this many decimal places [default: %(default)d]")
-ibs_parser.set_defaults(func = calc_malecot_ibd, command = "ibd")
+ibd_parser.set_defaults(func = calc_malecot_ibd, command = "ibd")
 
 ## polarize alleles using ancestral/outgroup genome in fasta format
 anc_parser = subparsers.add_parser("polarize",
