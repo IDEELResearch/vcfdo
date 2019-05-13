@@ -1179,6 +1179,43 @@ def calc_sfs(vcf, **kwargs):
 	for group_name, this_sfs in all_sfs.items():
 		print(*this_sfs.flatten(), sep = " ")
 
+def haplocall(vcf, **kwargs):
+
+	## load args into a namespace, so I don't have to recode so much stuff
+	args = argparse.Namespace(**kwargs)
+
+	## write outgoing VCF header
+	vcf.write_header()
+	vcf.add_counter("nkept","sites kept")
+	vcf.add_counter("noad","sites without AD annotation")
+	vcf.log.info("Generating pseudo-haploid calls by taking consensus allele in each sample at each site ...")
+	vcf.log.info("Requiring >= {} supporting reads to make a genotype call ...".format(args.min_reads))
+	for site in vcf:
+
+		if not "AD" in site.FORMAT or not "DP" in site.FORMAT:
+			vcf.counters["noad"].increment()
+			continue
+		else:
+			vcf.counters["nkept"].increment()
+
+		## get AD values and take argmax
+		acounts = site.format("AD")
+		consensus = np.argmax(acounts, 1)
+		maxreads = np.max(acounts, 1)
+		consensus[ maxreads < args.min_reads ] = -1
+
+		## convert missing to "."
+		final_call = [ "." if _ == -1 else str(_) for _ in consensus ]
+		final_ad = [ ",".join( str(_) for _ in x ) for x in acounts ]
+		final_dp = [ str(_[0]) for _ in site.format("DP") ]
+
+		fields = str(site).strip().split("\t")[:8]
+		fields += [ "GT:AD:DP" ]
+		fields += [ ":".join(_) for _ in zip(final_call, final_ad, final_dp) ]
+		print(*fields, sep = "\t")
+
+	vcf.show_count_summary()
+
 def thin_sites(vcf, **kwargs):
 
 	## load args into a namespace, so I don't have to recode so much stuff
@@ -1589,6 +1626,9 @@ def root_help_message(name = None):
 	      private           annotate sites where non-ref allele is only found in certain subset of samples
 	      sfs               approximate the n-dimensional unfolded SFS by sampling, possibly in windows
 
+	  --- Genotyping
+	      haplocall         convert diploid to pseudo-haploid call by taking consensus allele at each site
+
 	  --- Relatedness/ordination
 	      dist              calculate LD-weighted pairwise distances from WSAFs
 	      ibs               calculate simple identity-by-state (IBS) matrix from hard calls at polymorphic sites only
@@ -1834,6 +1874,14 @@ sfs_parser.add_argument("--calls", action = "store_true",
 					default = False,
 					help = "count hard genotype calls rather than supporting reads [default: %(default)s]")
 sfs_parser.set_defaults(func = calc_sfs, command = "sfs")
+
+haplo_parser = subparsers.add_parser("haplocall",
+	description = "Make pseudo-haploid genotype calls based on allele read depths.",
+	parents = [parser])
+haplo_parser.add_argument("--min-reads", type = int,
+					default = 1,
+					help = "require at least this many supporting reads to call a genotype [default: %(default)d]")
+haplo_parser.set_defaults(func = haplocall, command = "haplocall")
 
 ## calculate f3 statistic
 f3_parser = subparsers.add_parser("f3stat",

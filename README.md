@@ -46,6 +46,9 @@ Commands:
 	  private           annotate sites where non-ref allele is only found in certain subset of samples
 	  sfs               approximate the n-dimensional unfolded SFS by sampling, possibly in windows
 
+  --- Genotyping
+	  haplocall         convert diploid to pseudo-haploid call by taking consensus allele at each site
+
   --- Relatedness/ordination
 	  dist              calculate LD-weighted pairwise distances from WSAFs
 	  ibs               calculate simple identity-by-state (IBS) matrix from hard calls at polymorphic sites only
