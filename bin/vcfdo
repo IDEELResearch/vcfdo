@@ -1179,15 +1179,38 @@ def calc_sfs(vcf, **kwargs):
 	for group_name, this_sfs in all_sfs.items():
 		print(*this_sfs.flatten(), sep = " ")
 
+## calculate posterior prob of haploid genotype given PLAF and a (default-weak) beta prior
+def calc_haploid_gp(acounts, plaf, weight = 1):
+
+	a = acounts[:,0]
+	b = acounts[:,1]
+
+	alpha = 1 + weight*plaf
+	beta  = 1 + weight*(1-plaf)
+
+	alpha_p = alpha + a
+	beta_p  = beta + b
+
+	denom = np.log10(alpha_p + beta_p)
+	logpost_a = np.log10(alpha_p) - denom
+	logpost_b = np.log10(beta_p) - denom
+
+	return logpost_a, logpost_b
+
 def haplocall(vcf, **kwargs):
 
 	## load args into a namespace, so I don't have to recode so much stuff
 	args = argparse.Namespace(**kwargs)
 
+	vcf.add_format_to_header({ "ID": "GP", \
+							"Description": "Haploid genotype posterior given read counts and PLAFs (plus prior with weight={})".format(args.prior_weight), \
+							"Number": "G", "Type": "Float" })
+
 	## write outgoing VCF header
 	vcf.write_header()
 	vcf.add_counter("nkept","sites kept")
 	vcf.add_counter("noad","sites without AD annotation")
+	vcf.add_standard_counter("multiallelic")
 	vcf.log.info("Generating pseudo-haploid calls by taking consensus allele in each sample at each site ...")
 	vcf.log.info("Requiring >= {} supporting reads to make a genotype call ...".format(args.min_reads))
 	for site in vcf:
@@ -1195,8 +1218,11 @@ def haplocall(vcf, **kwargs):
 		if not "AD" in site.FORMAT or not "DP" in site.FORMAT:
 			vcf.counters["noad"].increment()
 			continue
-		else:
-			vcf.counters["nkept"].increment()
+
+		if site.is_multiallelic:
+			continue
+
+		vcf.counters["nkept"].increment()
 
 		## get AD values and take argmax
 		acounts = site.format("AD")
@@ -1204,14 +1230,30 @@ def haplocall(vcf, **kwargs):
 		maxreads = np.max(acounts, 1)
 		consensus[ maxreads < args.min_reads ] = -1
 
+		## calculate haploid genotype posteriors
+		w, plaf = site.get_imputed_wsaf()
+		post_ref, post_alt = calc_haploid_gp(acounts, plaf, args.prior_weight)
+		#print(post_ref, post_alt)
+		post_both = np.column_stack((post_ref, post_alt))
+		phred_both = np.round(-10.0*post_both)
+		#phred_ordered = np.sort(phred_both, axis = 1).astype(np.int) # NOPE, always same order
+		#phred_ordered = phred_both.astype(int) # NOPE, not Phred-scaled
+		#phred_ordered = np.column_stack( (phred_ordered[:,0], np.full(phred_ordered.shape[0], 99, dtype = np.int), phred_ordered[:,1]) )
+		phred_ordered = 10.0**(-1*phred_both/10.0)
+		phred_ordered /= np.sum(phred_ordered, 1, keepdims = True)
+		#phred_ordered = np.column_stack( (phred_ordered[:,0], np.zeros(phred_ordered.shape[0]), phred_ordered[:,1]) )
+
 		## convert missing to "."
-		final_call = [ "." if _ == -1 else str(_) for _ in consensus ]
+		final_call = [ "." if _ == -1 else "{0}".format(_) for _ in consensus ]
+		#final_call = [ "./." if _ == -1 else "{0}/{0}".format(_) for _ in consensus ]
 		final_ad = [ ",".join( str(_) for _ in x ) for x in acounts ]
 		final_dp = [ str(_[0]) for _ in site.format("DP") ]
+		#final_gp = [ ",".join( "{:0d}".format(_) for _ in x ) for x in phred_ordered ]
+		final_gp = [ ",".join( "{:0.3f}".format(_) for _ in x ) for x in phred_ordered ]
 
 		fields = str(site).strip().split("\t")[:8]
-		fields += [ "GT:AD:DP" ]
-		fields += [ ":".join(_) for _ in zip(final_call, final_ad, final_dp) ]
+		fields += [ "GT:AD:DP:GP" ]
+		fields += [ ":".join(_) for _ in zip(final_call, final_ad, final_dp, final_gp) ]
 		print(*fields, sep = "\t")
 
 	vcf.show_count_summary()
@@ -1881,6 +1923,9 @@ haplo_parser = subparsers.add_parser("haplocall",
 haplo_parser.add_argument("--min-reads", type = int,
 					default = 1,
 					help = "require at least this many supporting reads to call a genotype [default: %(default)d]")
+haplo_parser.add_argument("-w","--prior-weight", type = float,
+					default = 1.0,
+					help = "weight of beta prior on allele frequencies [default: %(default)d]")
 haplo_parser.set_defaults(func = haplocall, command = "haplocall")
 
 ## calculate f3 statistic
