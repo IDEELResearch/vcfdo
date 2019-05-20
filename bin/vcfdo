@@ -1057,7 +1057,14 @@ def calc_sfs(vcf, **kwargs):
 		vcf.log.error("Must specify either `--calls` OR `--reads`, and not both.")
 		sys.exit(1)
 
-	how_count = "READ COUNTS" if args.reads else "GENOTYPE CALLS"
+	if args.reads:
+		if args.use_gp:
+			how_count = "HAPLOID GENOTYPE POSTERIORS"
+		else:
+			how_count = "READ COUNTS"
+	else:
+		how_count = "GENOTYPE CALLS"
+
 	vcf.log.info("Calculating uSFS from {}".format(how_count))
 
 	pop_order, pops = vcf.reconcile_populations(args.pops)
@@ -1085,7 +1092,10 @@ def calc_sfs(vcf, **kwargs):
 	vcf.add_counter("nused","had usable data")
 	vcf.add_standard_counter("noancestral")
 	if args.reads:
-		vcf.add_standard_counter("nowsaf")
+		if args.use_gp:
+			vcf.add_standard_counter("nowsaf")
+		else:
+			vcf.add_counter("nogp","did not have genotype posteriors (FORMAT/GP)")
 	vcf.add_standard_counter("multiallelic")
 
 	ploidy = None
@@ -1119,28 +1129,46 @@ def calc_sfs(vcf, **kwargs):
 				continue
 
 			if args.reads:
-				if not site.has_format("WSAF"):
-					vcf.counters["nowsaf"].increment()
-					continue
+				if not args.use_gp:
+					if not site.has_format("WSAF"):
+						vcf.counters["nowsaf"].increment()
+						continue
+					else:
+						vcf.counters["nused"].increment()
+					counts = site.get_wsaf()
+					imp_counts, _ = site.get_imputed_wsaf()
+					sampled = np.zeros(len(ssz), dtype = np.int)
+					for jj,pop in enumerate(pop_order):
+						these_counts = counts[ pops[pop] ]
+						if these_counts.count == 0:
+							## all missing values
+							vcf.log.debug("site {}@{}[{}/{}] totally missing".format(site.CHROM, site.POS, site.REF, site.ALT[0]))
+							continue
+						these_counts = imp_counts[ pops[pop] ]
+						if site.alt_is_ancestral:
+							these_counts = 1 - these_counts
+						if np.min(these_counts < 0) or np.max(these_counts > 1):
+							vcf.log.debug("bad imputed WSAFs at {}@{}[{}/{}]: {}".format(site.CHROM, site.POS, site.REF, site.ALT[0], these_counts))
+							continue
+						sampled[jj] = np.sum(np.random.binomial(1, these_counts))
+					sampled = tuple(sampled)
 				else:
-					vcf.counters["nused"].increment()
-				counts = site.get_wsaf()
-				imp_counts, _ = site.get_imputed_wsaf()
-				sampled = np.zeros(len(ssz), dtype = np.int)
-				for jj,pop in enumerate(pop_order):
-					these_counts = counts[ pops[pop] ]
-					if these_counts.count == 0:
-						## all missing values
-						vcf.log.debug("site {}@{}[{}/{}] totally missing".format(site.CHROM, site.POS, site.REF, site.ALT[0]))
+					if not site.has_format("GP"):
+						vcf.counters["nogp"].increment()
 						continue
-					these_counts = imp_counts[ pops[pop] ]
+					else:
+						vcf.counters["nused"].increment()
+					gps = site.format("GP")
 					if site.alt_is_ancestral:
-						these_counts = 1 - these_counts
-					if np.min(these_counts < 0) or np.max(these_counts > 1):
-						vcf.log.debug("bad imputed WSAFs at {}@{}[{}/{}]: {}".format(site.CHROM, site.POS, site.REF, site.ALT[0], these_counts))
-						continue
-					sampled[jj] = np.sum(np.random.binomial(1, these_counts))
-				sampled = tuple(sampled)
+						counts_anc = gps[ :,1 ]
+						counts_der = gps[ :,0 ]
+					else:
+						counts_anc = gps[ :,0 ]
+						counts_der = gps[ :,1 ]
+					sampled = np.zeros(len(ssz), dtype = np.int)
+					for jj,pop in enumerate(pop_order):
+						sampled[jj] = np.round(np.sum(counts_der[ pops[pop] ])).astype(int)
+					sampled = tuple(sampled)
 			else:
 				vcf.counters["nused"].increment()
 				#print(site.REF, site.ALT, site.has_ancestral, site.ancestral, site.derived)
@@ -1915,6 +1943,9 @@ sfs_parser.add_argument("--reads", action = "store_true",
 sfs_parser.add_argument("--calls", action = "store_true",
 					default = False,
 					help = "count hard genotype calls rather than supporting reads [default: %(default)s]")
+sfs_parser.add_argument("--use-gp", action = "store_true",
+					default = False,
+					help = "get allele counts from haploid genotype posteriots (FORMAT/GP), with `--reads` [default: %(default)s]")
 sfs_parser.set_defaults(func = calc_sfs, command = "sfs")
 
 haplo_parser = subparsers.add_parser("haplocall",
