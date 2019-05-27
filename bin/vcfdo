@@ -910,7 +910,7 @@ def transition_or_transversion(vcf, **kwargs):
 	vcf.add_counter("nbad","sites with bad allele(s)", nbadallele)
 	vcf.add_counter("nti","transitions", nti)
 	vcf.add_counter("ntv","transversions", ntv)
-	vcf.add_counter("nbgc","gBGC candidates", ngbc)
+	vcf.add_counter("nbgc","gBGC candidates", nbgc)
 	vcf.show_count_summary()
 	vcf.log.info("\t[ TiTv = {:0.3f} ]".format(nti/ntv))
 
