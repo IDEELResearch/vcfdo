@@ -1040,6 +1040,88 @@ def flag_private(vcf, **kwargs):
 
 	vcf.show_count_summary()
 
+def ivl_to_region(ivl):
+	return "{}:{}-{}".format(ivl.chrom, ivl.start+1, ivl.end), ivl.name, ivl
+
+def tally_mutation_spectrum(vcf, **kwargs):
+
+	## load args into a namespace
+	args = argparse.Namespace(**kwargs)
+	ntcombo = list( map(lambda x: "{}>{}".format(x[0],x[1]), combinations("ACGT",2)) )
+
+	## loop on whole VCF or regions in BED (or other interval-like) file
+	if args.windows is None:
+		regions = [ (None,None,None) ]
+		vcf.log.info("Processing VCF file in one slurp ...")
+
+		ntcombo[0] = "#" + ntcombo[0]
+		print(*ntcombo, sep = "\t")
+	else:
+		regions = map(ivl_to_region, pbt.BedTool(args.windows))
+		vcf.log.info("Processing VCF file in chunks defined in <{}> ...".format(args.windows.name))
+		print("#chrom","start","end", *ntcombo, sep = "\t")
+
+	vcf.add_standard_counter("multiallelic")
+	vcf.add_standard_counter("noancestral")
+	vcf.add_counter("nnotsnv","not a SNV")
+	vcf.add_counter("nused","sites with usable data")
+
+	NT_AS_INT = { "A":0, "C":1, "G":2, "T":3 }
+
+	def new_mut_matrix():
+		return np.zeros((4,4), dtype = np.int)
+
+	nr = 0
+	for region,rname,ivl in regions:
+
+		nr += 1
+		if rname is None or rname == ".":
+			rname = "region{:06d}".format(nr)
+
+		## initialize counts
+		muts = new_mut_matrix()
+
+		for site in vcf.fetch_region(region):
+
+			## not a SNV?
+			if not site.is_snp:
+				vcf.counters["nnotsnv"].increment()
+
+			## not biallelic?
+			if len(site.ALT) > 1:
+				vcf.counters["nmulti"].increment()
+				continue
+
+			## no ancestral allele?
+			if not site.has_ancestral and not args.ref_is_ancestral:
+				vcf.counters["nnoanc"].increment()
+				continue
+
+			vcf.counters["nused"].increment()
+
+			aa = NT_AS_INT[ site.ancestral ]
+			da = NT_AS_INT[ site.derived ]
+			muts[ aa,da ] += 1
+
+		## done with inner loop; record this window's results
+		if region is None:
+			vcf.log.info(" ... finished region [whole VCF]; cumulative total {} sites [{} used].".format(vcf.ii, vcf.counters["nused"].count))
+		else:
+			vcf.log.info(" ... finished region {} (group '{}'); cumulative total {} sites [{} used].".format(region, rname, vcf.ii, vcf.counters["nused"].count))
+
+		rez = []
+		for _aa,_da in combinations("ACGT", 2):
+			aa = NT_AS_INT[ _aa ]
+			da = NT_AS_INT[ _da ]
+			rez.append( muts[ aa,da ] )
+		if ivl is None:
+			print(*rez, sep = "\t")
+		else:
+			print(ivl.chrom, ivl.start, ivl.end, *rez, sep = "\t")
+
+	vcf.show_count_summary()
+
+
 def calc_sfs(vcf, **kwargs):
 
 	## load args into a namespace, so I don't have to recode so much stuff
@@ -1077,12 +1159,9 @@ def calc_sfs(vcf, **kwargs):
 
 	vcf.log.info("SFS will have these dimensions: {}".format(dims))
 
-	def ivl_to_region(ivl):
-		return "{}:{}-{}".format(ivl.chrom, ivl.start+1, ivl.end), ivl.name
-
 	## loop on VCF
 	if args.windows is None:
-		regions = [ (None,None) ]
+		regions = [ (None,None,None) ]
 		vcf.log.info("Processing VCF file in one slurp ...")
 	else:
 		regions = map(ivl_to_region, pbt.BedTool(args.windows))
@@ -1100,7 +1179,7 @@ def calc_sfs(vcf, **kwargs):
 
 	ploidy = None
 	nr = 0
-	for region,rname in regions:
+	for region,rname,dummy in regions:
 
 		nr += 1
 		if rname is None or rname == ".":
@@ -1687,6 +1766,7 @@ def root_help_message(name = None):
 	  --- Ancestral alleles
 	      polarize          define ancestral alleles based on outgroup sequence
 	      titv              annotate sites as transitions or transversions; flag gBGC candidates
+	      spectrum          tally mutational spectrum: count SNVs by type (eg. A>C, C>T, ...)
 	      derived           count derived alleles per sample, using either read counts or hard calls
 
 	  --- Allele frequencies
@@ -1893,6 +1973,14 @@ anc_parser = subparsers.add_parser("titv",
 	description = "Annotate variants as transition or transversion; flag gBGC candidates",
 	parents = [parser])
 anc_parser.set_defaults(func = transition_or_transversion, command = "titv")
+
+## annotate sites as transition or transversion, gBGC or not, and biochemical "strength"
+s_parser = subparsers.add_parser("spectrum",
+	description = "Tally mutational spectrum: count SNVs by type (eg. A>C, C>T, ...)",
+	parents = [parser])
+s_parser.add_argument("-w","--windows", type = argparse.FileType("rU"),
+					help = "do spectrum in windows from this *.bed file [default: use whole file]")
+s_parser.set_defaults(func = tally_mutation_spectrum, command = "spectrum")
 
 ## count number of derived calls per sample
 anc_parser = subparsers.add_parser("derived",

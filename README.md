@@ -37,6 +37,7 @@ Commands:
   --- Ancestral alleles
 	  polarize          define ancestral alleles based on outgroup sequence
 	  titv              annotate sites as transitions or transversions; flag gBGC candidates
+	  spectrum          tally mutational spectrum: count SNVs by type (eg. A>C, C>T, ...)
 	  derived           count derived alleles per sample, using either read counts or hard calls
 
   --- Allele frequencies
