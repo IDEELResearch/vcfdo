@@ -14,7 +14,7 @@ import logging
 np.warnings.filterwarnings("ignore")
 
 import pybedtools as pbt
-from itertools import permutations, combinations
+from itertools import permutations, combinations, product
 from re import split as resplit
 from datetime import datetime as dt
 from collections import defaultdict, OrderedDict
@@ -1047,19 +1047,20 @@ def tally_mutation_spectrum(vcf, **kwargs):
 
 	## load args into a namespace
 	args = argparse.Namespace(**kwargs)
-	ntcombo = list( map(lambda x: "{}>{}".format(x[0],x[1]), combinations("ACGT",2)) )
+	ntcombo = list( filter(lambda x: x[0] != x[1], product("ACGT", repeat = 2)) )
+	ntcombo_code = [ "{}>{}".format(a,b) for (a,b) in ntcombo ]
 
 	## loop on whole VCF or regions in BED (or other interval-like) file
 	if args.windows is None:
 		regions = [ (None,None,None) ]
 		vcf.log.info("Processing VCF file in one slurp ...")
-
-		ntcombo[0] = "#" + ntcombo[0]
-		print(*ntcombo, sep = "\t")
+		headers = ntcombo_code
+		headers[0] = "#" + headers[0]
+		print(*headers, sep = "\t")
 	else:
 		regions = map(ivl_to_region, pbt.BedTool(args.windows))
 		vcf.log.info("Processing VCF file in chunks defined in <{}> ...".format(args.windows.name))
-		print("#chrom","start","end", *ntcombo, sep = "\t")
+		print("#chrom","start","end", *ntcombo_code, sep = "\t")
 
 	vcf.add_standard_counter("multiallelic")
 	vcf.add_standard_counter("noancestral")
@@ -1110,7 +1111,7 @@ def tally_mutation_spectrum(vcf, **kwargs):
 			vcf.log.info(" ... finished region {} (group '{}'); cumulative total {} sites [{} used].".format(region, rname, vcf.ii, vcf.counters["nused"].count))
 
 		rez = []
-		for _aa,_da in combinations("ACGT", 2):
+		for _aa,_da in ntcombo:
 			aa = NT_AS_INT[ _aa ]
 			da = NT_AS_INT[ _da ]
 			rez.append( muts[ aa,da ] )
