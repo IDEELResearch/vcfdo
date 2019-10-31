@@ -476,6 +476,9 @@ def calc_malecot_ibd(vcf, **kwargs):
 
 	args = argparse.Namespace(**kwargs)
 
+	if args.calls:
+		vcf.log.info("Estimating IBD from hard genotype calls, not WSAFs")
+
 	wsaf = vcf.add_chunk(None, args.chunk_size)
 	wsaf_imputed = vcf.add_chunk(None, args.chunk_size)
 	plafs = vcf.add_chunk(None, args.chunk_size, nsamples = 1)
@@ -491,15 +494,30 @@ def calc_malecot_ibd(vcf, **kwargs):
 			wsaf_imputed = vcf.add_chunk(wsaf_imputed, args.chunk_size)
 			plafs = vcf.add_chunk(plafs, args.chunk_size)
 
-		## get WSAFs from FORMAT field
-		this_wsaf = site.get_wsaf()
-		wsaf[ vcf.ii-1,: ] = this_wsaf
+		if args.calls:
+			## get count of ALT alleles
+			this_wsaf = site.to_n_alt()
+			wsaf[ vcf.ii-1,: ] = this_wsaf
+			#vcf.log.debug("{} {} {}".format(site.CHROM, site.POS, this_wsaf))
 
-		## impute PLAF for missing values
-		w, plaf = site.get_imputed_wsaf()
-		#vcf.log.debug("ii={} {}@{} INFO/PLAF={}, calc PLAF={}".format(vcf.ii-1, site.CHROM, site.POS, site.INFO["PLAF"], plaf))
-		plafs[ vcf.ii-1,0 ] = plaf
-		wsaf_imputed[ vcf.ii-1,: ] = w
+			## impute MAF for missing values
+			maf = np.average(this_wsaf)
+			w = 1.0*this_wsaf
+			w[ w.mask ] = maf
+			vcf.log.debug("ii={} {}@{} MAF={}, geno={}, imputed={}".format(vcf.ii-1, site.CHROM, site.POS, maf, this_wsaf, w))
+			plafs[ vcf.ii-1,0 ] = maf
+			wsaf_imputed[ vcf.ii-1,: ] = w
+
+		else:
+			## get WSAFs from FORMAT field
+			this_wsaf = site.get_wsaf()
+			wsaf[ vcf.ii-1,: ] = this_wsaf
+
+			## impute PLAF for missing values
+			w, plaf = site.get_imputed_wsaf()
+			#vcf.log.debug("ii={} {}@{} INFO/PLAF={}, calc PLAF={}".format(vcf.ii-1, site.CHROM, site.POS, site.INFO["PLAF"], plaf))
+			plafs[ vcf.ii-1,0 ] = plaf
+			wsaf_imputed[ vcf.ii-1,: ] = w
 
 	vcf.show_count_summary()
 
@@ -1946,6 +1964,8 @@ ibd_parser = subparsers.add_parser("ibd",
 	parents = [parser])
 ibd_parser.add_argument("--self-only", action = "store_true",
 					help = "estimate within-sample IBD (ie. inbreeding coefficients) instead of pairwise")
+ibd_parser.add_argument("--calls", action = "store_true",
+					help = "use hard genotype calls instead of WSAFs")
 ibd_parser.add_argument("-w","--wsaf-threshold", type = float,
 					default = 0.01,
 					help = "minimum WSAF to consider evidence for >1 allele when `--self-only` [default: %(default)f]")
