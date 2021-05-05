@@ -283,6 +283,7 @@ class VcfSite:
 		self.ALT = self._site.ALT
 		self.INFO = self._site.INFO
 		self.FORMAT = self._site.FORMAT
+		self.ID = self._site.ID
 		self.ploidy = self._site.ploidy
 		self.nsamples = len(self._site.gt_types)
 		self.gt_types = self._site.gt_types
