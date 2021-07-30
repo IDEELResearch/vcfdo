@@ -1852,12 +1852,13 @@ def root_help_message(name = None):
 	the current working directory and a timestamp.
 	"""
 
+main_parser = argparse.ArgumentParser()
 parser = argparse.ArgumentParser(
 	description = "Some utilities for annotating, summarising and filtering VCF files with an eye towards Plasmodium spp.",
 	usage = root_help_message(),
 	add_help = False)
-subparsers = parser.add_subparsers(dest = "command")
-subparsers.required = True
+subparsers = main_parser.add_subparsers(dest = "command")
+#subparsers.required = True
 parser.add_argument("-i","--infile",
 					default = "/dev/stdin",
 					help = "VCF file, possibly gzipped [default: stdin]")
@@ -1897,7 +1898,7 @@ wsaf_parser.add_argument("--ignore-missing", action = "store_true",
 wsaf_parser.add_argument("--set-filter", type = float,
 						default = None,
 						help = "apply genotype-level filter for samples with WSAF outside specified bounds [default: don't do this]")
-wsaf_parser.set_defaults(func = calc_wsaf, command = "wsaf")
+wsaf_parser.set_defaults(func = calc_wsaf)#, command = "wsaf")
 
 ## calculate F_ws from WSAF
 fws_parser = subparsers.add_parser("fws",
@@ -1906,7 +1907,7 @@ fws_parser = subparsers.add_parser("fws",
 fws_parser.add_argument("-j","--jackknife", type = int,
 					default = None,
 					help = "estimate standard errors by block jackknife with this block size (number of sites) [default: use asymptotics]")
-fws_parser.set_defaults(func = calc_fws, command = "fws")
+fws_parser.set_defaults(func = calc_fws)#, command = "fws")
 
 ## calculate WSAF, PLAF, PLMAF
 wsaf_parser = subparsers.add_parser("wsafhist",
@@ -1915,13 +1916,13 @@ wsaf_parser = subparsers.add_parser("wsafhist",
 wsaf_parser.add_argument("-b","--binwidth", type = float,
 						default = 0.05,
 						help = "width of histogram bins [default: %(default)f]")
-wsaf_parser.set_defaults(func = calc_wsaf_hist, command = "wsafhist")
+wsaf_parser.set_defaults(func = calc_wsaf_hist)#, command = "wsafhist")
 
 ## summarise depth per sample per called site
 dp_parser = subparsers.add_parser("depthsummary",
 	description = "Summarise depth (FORMAT:DP) per site per sample, splitting by filter status of sites.",
 	parents = [parser])
-dp_parser.set_defaults(func = summarise_dp, command = "depthsummary")
+dp_parser.set_defaults(func = summarise_dp)#, command = "depthsummary")
 
 ## summarise filters at site or individual level
 flt_parser = subparsers.add_parser("filtersummary",
@@ -1931,7 +1932,7 @@ flt_parser.add_argument("--sites", action = "store_true",
 						help = "tally filter status of sites")
 flt_parser.add_argument("--samples", action = "store_true",
 						help = "tally filter status of per-sample genotypes")
-flt_parser.set_defaults(func = summarise_flt, command = "filtersummary")
+flt_parser.set_defaults(func = summarise_flt)#, command = "filtersummary")
 
 ## summarise filters at site or individual level
 miss_parser = subparsers.add_parser("missing",
@@ -1941,7 +1942,7 @@ miss_parser.add_argument("--sites", action = "store_true",
 						help = "tally missingness per site")
 miss_parser.add_argument("--samples", action = "store_true",
 						help = "tally missingness per sample, across all sites")
-miss_parser.set_defaults(func = calc_missingness, command = "missing")
+miss_parser.set_defaults(func = calc_missingness)#, command = "missing")
 
 ## do PCA on WSAFs
 pca_parser = subparsers.add_parser("pca",
@@ -1967,7 +1968,7 @@ pca_parser.add_argument("-K","--ncomponents", type = int,
 					help = "calculate the first K PCs if using randomized SVD algorithm [default: %(default)d]")
 pca_parser.add_argument("--randomized", action = "store_true",
 					help = "use fast randomized SVD algorithm")
-pca_parser.set_defaults(func = pca_wsaf, command = "pca")
+pca_parser.set_defaults(func = pca_wsaf)#, command = "pca")
 
 ## genetic distance from WSAFs, weighted for LD
 dist_parser = subparsers.add_parser("dist",
@@ -1981,7 +1982,7 @@ dist_parser.add_argument("-r","--rsq-cutoff", type = float,
 					help = "ignore site pairs with r^2 < cutoff when assigning weights [default: %(default)f]")
 dist_parser.add_argument("-u","--unweighted", action = "store_true",
 					help = "calculated distance from WSAFs but ignore LD")
-dist_parser.set_defaults(func = calc_weighted_dist, command = "dist")
+dist_parser.set_defaults(func = calc_weighted_dist)#, command = "dist")
 
 ## quick identity-by-state on hard genotypes
 ibs_parser = subparsers.add_parser("ibs",
@@ -1992,7 +1993,7 @@ ibs_parser.add_argument("-d","--digits", type = int,
 					help = "report IBS to this many decimal places [default: %(default)d]")
 ibs_parser.add_argument("--flatten", action = "store_true",
 					help = "report one pair of individuals per line, rather than square matrix")
-ibs_parser.set_defaults(func = calc_ibs_dist, command = "ibs")
+ibs_parser.set_defaults(func = calc_ibs_dist)#, command = "ibs")
 
 ## quick identity-by-state on hard genotypes
 ibd_parser = subparsers.add_parser("ibd",
@@ -2014,7 +2015,7 @@ ibd_parser.add_argument("--max-iter", type = int,
 ibd_parser.add_argument("-d","--digits", type = int,
 					default = 3,
 					help = "report IBS to this many decimal places [default: %(default)d]")
-ibd_parser.set_defaults(func = calc_malecot_ibd, command = "ibd")
+ibd_parser.set_defaults(func = calc_malecot_ibd)#, command = "ibd")
 
 ## polarize alleles using ancestral/outgroup genome in fasta format
 anc_parser = subparsers.add_parser("polarize",
@@ -2023,13 +2024,13 @@ anc_parser = subparsers.add_parser("polarize",
 anc_parser.add_argument("-f","--fasta",
 					required = True,
 					help = "ancestral genome fasta file, **in same coordinates as reference**")
-anc_parser.set_defaults(func = polarize_anc_vs_der, command = "polarize")
+anc_parser.set_defaults(func = polarize_anc_vs_der)#, command = "polarize")
 
 ## annotate sites as transition or transversion, gBGC or not, and biochemical "strength"
 anc_parser = subparsers.add_parser("titv",
 	description = "Annotate variants as transition or transversion; flag gBGC candidates",
 	parents = [parser])
-anc_parser.set_defaults(func = transition_or_transversion, command = "titv")
+anc_parser.set_defaults(func = transition_or_transversion)#, command = "titv")
 
 ## annotate sites as transition or transversion, gBGC or not, and biochemical "strength"
 s_parser = subparsers.add_parser("spectrum",
@@ -2037,7 +2038,7 @@ s_parser = subparsers.add_parser("spectrum",
 	parents = [parser])
 s_parser.add_argument("-w","--windows", type = argparse.FileType("rU"),
 					help = "do spectrum in windows from this *.bed file [default: use whole file]")
-s_parser.set_defaults(func = tally_mutation_spectrum, command = "spectrum")
+s_parser.set_defaults(func = tally_mutation_spectrum)#, command = "spectrum")
 
 ## count number of derived calls per sample
 anc_parser = subparsers.add_parser("derived",
@@ -2049,13 +2050,13 @@ anc_parser.add_argument("--reads", action = "store_true",
 anc_parser.add_argument("--calls", action = "store_true",
 					default = False,
 					help = "count hard genotype calls rather than supporting reads [default: %(default)s]")
-anc_parser.set_defaults(func = count_derived, command = "derived")
+anc_parser.set_defaults(func = count_derived)#, command = "derived")
 
 ## convert haploid genotypes to homozygotes
 anc_parser = subparsers.add_parser("diploidize",
 	description = "Convert haploid genotypes to diploid, dropping all INFO fields",
 	parents = [parser])
-anc_parser.set_defaults(func = diploidize, command = "diploidize")
+anc_parser.set_defaults(func = diploidize)#, command = "diploidize")
 
 ## identify variants where non-ref allele is present in only specified subset of samples
 priv_parser = subparsers.add_parser("private",
@@ -2078,7 +2079,7 @@ priv_parser.add_argument("--calls", action = "store_true",
 priv_parser.add_argument("-c","--min-count", type = int,
 					default = 1,
 					help = "minimum supporting observations (reads or chromosomes) in focal sample(s) for allele to be called 'present' [default: %(default)d]")
-priv_parser.set_defaults(func = flag_private, command = "private")
+priv_parser.set_defaults(func = flag_private)#, command = "private")
 
 ## calculate n-dimensional SFS
 sfs_parser = subparsers.add_parser("sfs",
@@ -2097,7 +2098,7 @@ sfs_parser.add_argument("--calls", action = "store_true",
 sfs_parser.add_argument("--use-gp", action = "store_true",
 					default = False,
 					help = "get allele counts from haploid genotype posteriots (FORMAT/GP), with `--reads` [default: %(default)s]")
-sfs_parser.set_defaults(func = calc_sfs, command = "sfs")
+sfs_parser.set_defaults(func = calc_sfs)#, command = "sfs")
 
 haplo_parser = subparsers.add_parser("haplocall",
 	description = "Make pseudo-haploid genotype calls based on allele read depths.",
@@ -2108,7 +2109,7 @@ haplo_parser.add_argument("--min-reads", type = int,
 haplo_parser.add_argument("-w","--prior-weight", type = float,
 					default = 1.0,
 					help = "weight of beta prior on allele frequencies [default: %(default)d]")
-haplo_parser.set_defaults(func = haplocall, command = "haplocall")
+haplo_parser.set_defaults(func = haplocall)#, command = "haplocall")
 
 ## calculate f3 statistic
 f3_parser = subparsers.add_parser("f3stat",
@@ -2128,7 +2129,7 @@ f3_parser.add_argument("--calls", action = "store_true",
 f3_parser.add_argument("-j","--jackknife", type = int,
 					default = 1000,
 					help = "estimate standard errors by block jackknife with this block size (number of sites) [default: %(default)d]")
-f3_parser.set_defaults(func = calc_f3, command = "f3stat")
+f3_parser.set_defaults(func = calc_f3)#, command = "f3stat")
 
 ## calculate f4 statistic
 f4_parser = subparsers.add_parser("f4stat",
@@ -2145,7 +2146,7 @@ f4_parser.add_argument("--calls", action = "store_true",
 f4_parser.add_argument("-j","--jackknife", type = int,
 					default = 1000,
 					help = "estimate standard errors by block jackknife with this block size (number of sites) [default: %(default)d]")
-f4_parser.set_defaults(func = calc_f4, command = "f4stat")
+f4_parser.set_defaults(func = calc_f4)#, command = "f4stat")
 
 ## make TreeMix input file
 tmx_parser = subparsers.add_parser("treemix",
@@ -2159,7 +2160,7 @@ tmx_parser.add_argument("--reads", action = "store_true",
 tmx_parser.add_argument("--calls", action = "store_true",
 					default = False,
 					help = "count hard genotype calls rather than supporting reads [default: %(default)s]")
-tmx_parser.set_defaults(func = make_treemix, command = "treemix")
+tmx_parser.set_defaults(func = make_treemix)#, command = "treemix")
 
 ## keep only every nth site
 thin_parser = subparsers.add_parser("thin",
@@ -2168,7 +2169,7 @@ thin_parser = subparsers.add_parser("thin",
 thin_parser.add_argument("-Q", "--every", type = int,
 						default = 10,
 						help = "emit one site per this many visited [default: %(default)d]")
-thin_parser.set_defaults(func = thin_sites, command = "thin")
+thin_parser.set_defaults(func = thin_sites)#, command = "thin")
 
 ## prune for LD
 prune_parser = subparsers.add_parser("prune",
@@ -2186,10 +2187,14 @@ prune_parser.add_argument("-r", "--r-squared", type = float,
 prune_parser.add_argument("-m", "--niter", type = int,
 						default = 5,
 						help = "perform this many rounds of pruning in each window before giving up [default: %(default)d]")
-prune_parser.set_defaults(func = prune_sites_by_ld, command = "prune")
+prune_parser.set_defaults(func = prune_sites_by_ld)#, command = "prune")
 
 ## parse command line
-args = parser.parse_args()
+args = main_parser.parse_args()
+#print(args)
+if args.command is None:
+	sys.stderr.write(root_help_message() + "\n")
+	sys.exit(1)
 
 ## set up log trace
 if args.quiet:
